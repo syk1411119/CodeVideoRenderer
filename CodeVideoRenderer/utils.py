@@ -356,10 +356,14 @@ class RichProgressBarLogger(ProgressBarLogger):
         """
         Update the Rich progress bar task based on the attribute change.
         """
+        if not self.output or self.progress_bar is None:
+            return
         if bar not in self.rich_bars:
             self.new_tqdm_bar(bar)
-        
+
         task_id = self.rich_bars.get(bar)
+        if task_id is None:
+            return
         if attr == "index":
             # 处理帧数更新（核心）
             if value >= old_value:

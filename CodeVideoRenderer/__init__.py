@@ -19,6 +19,9 @@ Modules
 -------
 
 * :mod:`~.renderer` — Core rendering engine (:class:`~.CameraFollowCursorCV`).
+* :mod:`~.postprocess` — Video post-processing helpers (subtitles, audio, quality, watermarks, …).
+* :mod:`~.vscode_theme` — VS Code Dark+ 语法高亮主题与词法器.
+* :mod:`~.ime` — 中文输入法（拼音 + 候选词）模拟.
 * :mod:`~.config` — Default constants and configuration values.
 * :mod:`~.typing` — Type aliases used across the library.
 * :mod:`~.utils` — Internal utility functions and helpers.
@@ -28,4 +31,7 @@ from .renderer import *
 from .config import *
 from .typing import *
 from .utils import *
+from .postprocess import *
+from .vscode_theme import VSCodeDarkPlusStyle, register_vscode, STYLE_NAME
+from .ime import is_cjk, cjk_run_at, get_ime
 from .version import __version__

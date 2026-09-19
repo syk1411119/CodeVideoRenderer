@@ -1,5 +1,5 @@
 from __future__ import annotations # for Sphinx typehints
-from manim import VGroup, Code, SurroundingRectangle, RoundedRectangle, MovingCameraScene, rate_functions, RendererType, config, WHITE, GREY, UP, DOWN, LEFT, RIGHT, register_font
+from manim import VGroup, Code, SurroundingRectangle, RoundedRectangle, Rectangle, Line, MovingCameraScene, rate_functions, RendererType, config, WHITE, GREY, UP, DOWN, LEFT, RIGHT, register_font, FadeOut, FadeIn, Text
 from manim.typing import Point3D
 from pathlib import Path
 from copy import copy
@@ -14,8 +14,93 @@ import random, inspect, os
 from .config import *
 from .typing import *
 from .utils import *
+from .vscode_theme import register_vscode, resolve_language, STYLE_NAME
+from .ime import is_cjk, get_ime
 
 traceback.install()
+register_vscode()
+
+# VS Code 风格的代码补全：触发关键词 -> 候选建议 (标签, 种类, 详情)
+AUTOCOMPLETE_SUGGESTIONS: Dict[str, List[Tuple[str, str, str]]] = {
+    "def": [
+        ("def", "keyword", "keyword"),
+        ("def name():", "snippet", "function"),
+        ("def name(args):", "snippet", "function"),
+        ("def __init__(self):", "method", "method"),
+    ],
+    "class": [
+        ("class", "keyword", "keyword"),
+        ("class Name:", "snippet", "class"),
+        ("class Name(Base):", "snippet", "class"),
+        ("class Meta:", "snippet", "class"),
+    ],
+    "import": [
+        ("import os", "module", "module"),
+        ("import sys", "module", "module"),
+        ("import numpy as np", "module", "module"),
+        ("import re", "module", "module"),
+    ],
+    "from": [
+        ("from module import name", "snippet", "import"),
+        ("from . import name", "module", "import"),
+        ("from typing import List", "module", "module"),
+    ],
+    "for": [
+        ("for i in range(n):", "snippet", "loop"),
+        ("for item in iterable:", "snippet", "loop"),
+        ("for k, v in d.items():", "snippet", "loop"),
+    ],
+    "if": [
+        ("if condition:", "snippet", "conditional"),
+        ("if x is None:", "snippet", "conditional"),
+        ("if __name__ == '__main__':", "snippet", "main"),
+    ],
+    "return": [
+        ("return", "keyword", "keyword"),
+        ("return value", "snippet", "statement"),
+        ("return None", "snippet", "statement"),
+        ("return self", "snippet", "statement"),
+    ],
+    "print": [
+        ("print", "function", "built-in"),
+        ("print(*args)", "function", "built-in"),
+        ("print(f'...')", "function", "built-in"),
+    ],
+    "while": [
+        ("while condition:", "snippet", "loop"),
+        ("while True:", "snippet", "loop"),
+    ],
+    "try": [
+        ("try:", "snippet", "exception"),
+        ("try: ... except Exception as e:", "snippet", "exception"),
+    ],
+    "with": [
+        ("with open(...) as f:", "snippet", "context manager"),
+        ("with contextlib.suppress(...):", "snippet", "context manager"),
+    ],
+}
+
+# VS Code 补全图标：种类 -> (字形, 颜色)。字形/颜色对应 VS Code 的 Codicon + symbolIcon 配色
+AUTOCOMPLETE_KIND_STYLE: Dict[str, Tuple[str, str]] = {
+    "keyword": ("⚿", "#569CD6"),     # 蓝色 key 图标
+    "function": ("ƒ", "#B180D7"),     # 紫色 ƒ
+    "method": ("ƒ", "#B180D7"),       # 紫色 ƒ
+    "class": ("▣", "#EE9D28"),        # 橙色方块
+    "module": ("▣", "#75BEFF"),       # 蓝色方块
+    "snippet": ("➤", "#75BEFF"),      # 蓝色箭头
+    "variable": ("●", "#75BEFF"),     # 蓝色圆点
+    "string": ("§", "#CE9178"),       # 橙色 §
+    "number": ("≡", "#B5CEA8"),       # 绿色 ≡
+    "constant": ("≡", "#B5CEA8"),
+    "property": ("●", "#75BEFF"),
+}
+
+# VS Code 深色主题的补全框配色（与 Dark+ 一致）
+_SUGGEST_BG = "#252526"
+_SUGGEST_BORDER = "#454545"
+_SUGGEST_FG = "#D4D4D4"
+_SUGGEST_DETAIL = "#808080"
+_SUGGEST_SELECTED_BG = "#04395E"
 
 class CameraFollowCursorCV:
     """
@@ -25,12 +110,23 @@ class CameraFollowCursorCV:
     Args:
         code (Union[Tuple[Literal['string'], str], Tuple[Literal['file'], StrPath]]): The code to be animated. **When using a string**, provide a tuple with the first element as ``'string'`` and the second element as the code string. **When using a file**, provide a tuple with the first element as ``'file'`` and the second element as the file path.
         language (PygmentsLanguage): The programming language of the code.
-        formatter_style (PygmentsFormatterStyle): The style for syntax highlighting. Defaults to ``"material"``.
+        formatter_style (PygmentsFormatterStyle): The style for syntax highlighting. Defaults to ``"vscode-dark-plus"`` (VS Code Dark+ 配色).
         line_spacing (Union[float, int]): The line spacing for the code. Defaults to :data:`~.DEFAULT_LINE_SPACING`.
         interval_range (Tuple[Union[float, int], Union[float, int]]): The range of typing intervals between characters. Defaults to (:data:`~.DEFAULT_TYPE_INTERVAL`, :data:`~.DEFAULT_TYPE_INTERVAL`).
         camera_scale (Union[float, int]): The scale factor for the camera. Defaults to 0.5.
         video_name (str): The name of the output video file. Defaults to ``"CameraFollowCursorCV"``.
         renderer (Literal['cairo', 'opengl']): The renderer to use for video rendering. Defaults to ``'cairo'``.
+        clear_code (bool): Whether to clear the code off screen after the typing animation finishes. Defaults to ``False``.
+        clear_code_mode (Literal['fade', 'backspace']): How to clear the code. ``'backspace'`` deletes character by character (like pressing backspace); ``'fade'`` fades the whole block out at once. Defaults to ``'backspace'``.
+        clear_code_run_time (float): Duration (seconds) of the whole-block fade (``clear_code_mode='fade'``) or the final fade of line numbers/cursor (backspace mode). Defaults to 1.0.
+        clear_code_interval (float): Time between deleting each character in backspace mode — controls the deletion speed. Defaults to 0.03.
+        autocomplete (bool): Whether to show VS Code-style completion popups when a keyword (``def``, ``import``, ``class``, …) is typed. Defaults to ``False``.
+        autocomplete_wait_time (float): How long each completion popup stays on screen (seconds). Defaults to 0.6.
+        chinese_ime (bool): Whether to show a Chinese IME-style candidate box (拼音 + 候选词) when Chinese characters are typed. Defaults to ``False``.
+        ime_wait_time (float): How long each IME candidate box stays on screen (seconds). Defaults to 0.6.
+        background_color (str): The scene background color. Defaults to ``"#000000"``.
+        line_highlight_color (str): Fill color of the rectangle highlighting the line being typed. Defaults to ``"#333333"``.
+        end_wait_time (float): How long to pause on the final frame after typing (seconds). Defaults to 1.0.
     """
     __all__ = ["render"]
 
@@ -38,12 +134,23 @@ class CameraFollowCursorCV:
     def __init__(self,
         code: Union[Tuple[Literal['string'], str], Tuple[Literal['file'], StrPath]],
         language: PygmentsLanguage,
-        formatter_style: PygmentsFormatterStyle = "material",
+        formatter_style: PygmentsFormatterStyle = "vscode-dark-plus",
         line_spacing: Union[float, int] = DEFAULT_LINE_SPACING,
         interval_range: Tuple[Union[float, int], Union[float, int]] = (DEFAULT_TYPE_INTERVAL, DEFAULT_TYPE_INTERVAL),
         camera_scale: Union[float, int] = 0.5,
         video_name: str = "CameraFollowCursorCV",
         renderer: Literal['cairo', 'opengl'] = 'cairo',
+        clear_code: bool = False,
+        clear_code_mode: Literal['fade', 'backspace'] = 'backspace',
+        clear_code_run_time: float = 1.0,
+        clear_code_interval: float = 0.03,
+        autocomplete: bool = False,
+        autocomplete_wait_time: float = 0.6,
+        chinese_ime: bool = False,
+        ime_wait_time: float = 0.6,
+        background_color: str = "#000000",
+        line_highlight_color: str = "#333333",
+        end_wait_time: float = 1.0,
     ):
         # ----- 视频名称 -----
         if not video_name:
@@ -74,6 +181,10 @@ class CameraFollowCursorCV:
         if interval_range[0] > interval_range[1]:
             raise ValueError("The first term of interval_range must be less than or equal to the second term")
 
+        # ----- 删除速度 -----
+        if clear_code_interval <= 0:
+            raise ValueError("clear_code_interval must be greater than 0")
+
         # 参数
         global Parameters
         @dataclass
@@ -86,6 +197,17 @@ class CameraFollowCursorCV:
             camera_scale: Union[float, int]
             video_name: str
             renderer: Literal['cairo', 'opengl']
+            clear_code: bool
+            clear_code_mode: Literal['fade', 'backspace']
+            clear_code_run_time: float
+            clear_code_interval: float
+            autocomplete: bool
+            autocomplete_wait_time: float
+            chinese_ime: bool
+            ime_wait_time: float
+            background_color: str
+            line_highlight_color: str
+            end_wait_time: float
         Parameters.code = code
         Parameters.language = language
         Parameters.formatter_style = formatter_style
@@ -94,6 +216,17 @@ class CameraFollowCursorCV:
         Parameters.camera_scale = camera_scale
         Parameters.video_name = video_name
         Parameters.renderer = renderer
+        Parameters.clear_code = clear_code
+        Parameters.clear_code_mode = clear_code_mode
+        Parameters.clear_code_run_time = clear_code_run_time
+        Parameters.clear_code_interval = clear_code_interval
+        Parameters.autocomplete = autocomplete
+        Parameters.autocomplete_wait_time = autocomplete_wait_time
+        Parameters.chinese_ime = chinese_ime
+        Parameters.ime_wait_time = ime_wait_time
+        Parameters.background_color = background_color
+        Parameters.line_highlight_color = line_highlight_color
+        Parameters.end_wait_time = end_wait_time
 
         # 其他
         self.code_str = stripEmptyLines(self.code_str)
@@ -103,10 +236,12 @@ class CameraFollowCursorCV:
         self.code_str_lines = self.code_str.splitlines()
         self.origin_config = {
             'disable_caching': config.disable_caching,
-            'renderer': config.renderer
+            'renderer': config.renderer,
+            'background_color': config.background_color
         }
         config.disable_caching = True
         config.renderer = renderer
+        config.background_color = background_color
         self.scene = self._create_scene()
 
     def _create_scene(self):
@@ -130,8 +265,8 @@ class CameraFollowCursorCV:
                 with register_font(os.path.join(os.path.dirname(__file__), 'fonts/CodeVideoRendererFont.ttf')):
                     line_number_mobject, code_mobject = Code(
                         code_string=self.code_str + f"\n{(max([len(line.rstrip()) for line in self.code_str_lines])*2)*' ' + OCCUPY_CHARACTER}",
-                        language=Parameters.language, 
-                        formatter_style=Parameters.formatter_style, 
+                        language=resolve_language(Parameters.language),
+                        formatter_style=Parameters.formatter_style,
                         paragraph_config={
                             'font': 'CodeVideoRendererFont',
                             'line_spacing': Parameters.line_spacing
@@ -154,7 +289,7 @@ class CameraFollowCursorCV:
                 # 创建代码行矩形框
                 code_line_rectangle = SurroundingRectangle(
                     VGroup(code_mobject[-1], line_number_mobject[-1]), # type: ignore
-                    color="#333333",
+                    color=Parameters.line_highlight_color,
                     fill_opacity=1,
                     stroke_width=0
                 ).set_y(code_mobject[0].get_y())
@@ -208,6 +343,78 @@ class CameraFollowCursorCV:
                         scene.Animation_list.clear()
                         del cameraAnimation
 
+                # 记录所有已打出的字符，供退格删除使用
+                typed_mobjects: List = []
+
+                font_path = os.path.join(os.path.dirname(__file__), 'fonts/CodeVideoRendererFont.ttf')
+
+                def showAutocomplete(keyword: str):
+                    """弹出仿 VS Code 的 IntelliSense 补全框：图标 + 标签 + 详情 + 选中高亮。"""
+                    suggestions = AUTOCOMPLETE_SUGGESTIONS.get(keyword, [])[:5]
+                    if not suggestions:
+                        return
+                    with register_font(font_path):
+                        rows = []
+                        for label, kind, detail in suggestions:
+                            glyph, color = AUTOCOMPLETE_KIND_STYLE.get(kind, ("▣", "#75BEFF"))
+                            icon = Text(glyph, font="CodeVideoRendererFont", font_size=20, color=color)
+                            label_t = Text(label, font="CodeVideoRendererFont", font_size=30, color=_SUGGEST_FG)
+                            detail_t = Text(detail, font="CodeVideoRendererFont", font_size=22, color=_SUGGEST_DETAIL)
+                            rows.append((icon, label_t, detail_t))
+
+                    left_parts, detail_parts = [], []
+                    for icon, label_t, detail_t in rows:
+                        left_parts.append(VGroup(icon, label_t).arrange(RIGHT, aligned_edge=DOWN, buff=0.18))
+                        detail_parts.append(detail_t)
+                    left_col = VGroup(*left_parts).arrange(DOWN, aligned_edge=LEFT, buff=0.16)
+                    detail_col = VGroup(*detail_parts).arrange(DOWN, aligned_edge=RIGHT, buff=0.16)
+                    detail_col.next_to(left_col, RIGHT, buff=1.2)
+
+                    content = VGroup(left_col, detail_col)
+                    box = SurroundingRectangle(
+                        content, color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG,
+                        fill_opacity=1, stroke_width=1, buff=0.3, corner_radius=0.08,
+                    )
+                    # 第一项（选中项）整行高亮
+                    first = left_col[0]
+                    sel = Rectangle(
+                        width=box.get_width() - 0.55, height=first.get_height() + 0.16,
+                        color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
+                    ).move_to([box.get_x(), first.get_y(), 0])
+
+                    popup = VGroup(box, sel, left_col, detail_col)
+                    popup.next_to(cursor, DOWN, buff=0.4).shift(RIGHT * 0.5)
+
+                    scene.add(popup)
+                    scene.play(FadeIn(popup), run_time=0.12)
+                    scene.wait(Parameters.autocomplete_wait_time)
+                    scene.play(FadeOut(popup), run_time=0.12)
+
+                def showIme(pinyin: str, candidates):
+                    """弹出中文输入法候选框：拼音（带横杠）+ 横线分隔 + 候选词。"""
+                    if not candidates:
+                        return
+                    with register_font(font_path):
+                        py_t = Text(pinyin, font="CodeVideoRendererFont", font_size=24, color="#9CDCFE")
+                        cands = [Text(c, font="CodeVideoRendererFont", font_size=30, color="#808080") for c in candidates]
+                    cands[0].set_color(_SUGGEST_FG)
+                    cand_row = VGroup(*cands).arrange(RIGHT, aligned_edge=UP, buff=0.35)
+                    inner_w = max(py_t.get_width(), cand_row.get_width())
+                    bar = Rectangle(width=inner_w, height=0.03, fill_color=_SUGGEST_BORDER, fill_opacity=1, stroke_width=0)
+                    content = VGroup(py_t, bar, cand_row).arrange(DOWN, aligned_edge=LEFT, buff=0.14)
+                    first_hl = SurroundingRectangle(cands[0], color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0, buff=0.08)
+                    box = SurroundingRectangle(
+                        content, color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG,
+                        fill_opacity=1, stroke_width=1, buff=0.3, corner_radius=0.08,
+                    )
+                    popup = VGroup(box, first_hl, py_t, bar, cand_row)
+                    popup.next_to(cursor, DOWN, buff=0.4).shift(RIGHT * 0.5)
+
+                    scene.add(popup)
+                    scene.play(FadeIn(popup), run_time=0.12)
+                    scene.wait(Parameters.ime_wait_time)
+                    scene.play(FadeOut(popup), run_time=0.12)
+
                 with copy(DefaultProgressBar(self.output)) as progress:
                     total_progress = progress.add_task(description="[yellow]Total[/yellow]", total=total_char_numbers)
 
@@ -240,6 +447,19 @@ class CameraFollowCursorCV:
                         first_non_space_index = len(self.code_str_lines[line]) - len(self.code_str_lines[line].lstrip())
                         total_typing_chars = char_num # 当前行实际要打的字数
 
+                        # 计算该行补全提示的触发点（关键词打完整的那一刻）
+                        trigger_column = None
+                        trigger_keyword = None
+                        if Parameters.autocomplete:
+                            stripped = self.code_str_lines[line].lstrip()
+                            for kw in AUTOCOMPLETE_SUGGESTIONS:
+                                if stripped.startswith(kw):
+                                    rest = stripped[len(kw):]
+                                    if rest == "" or not (rest[0].isalnum() or rest[0] == "_"):
+                                        trigger_keyword = kw
+                                        trigger_column = first_non_space_index + len(kw) - 1
+                                        break
+
                         # 遍历当前行的每个字符
                         submobjects_char_index = 0
                         for column in range(first_non_space_index, char_num + first_non_space_index):
@@ -247,6 +467,7 @@ class CameraFollowCursorCV:
                             if not self.code_str_lines[line][column].isspace():
                                 if [line, column] not in self.space_positions:
                                     scene.add(code_mobject[line][submobjects_char_index])
+                                    typed_mobjects.append(code_mobject[line][submobjects_char_index])
                                 submobjects_char_index += 1
                             cursor.next_to(
                                 code_mobject[line][submobjects_char_index-1],
@@ -296,10 +517,63 @@ class CameraFollowCursorCV:
                             progress.advance(total_progress, advance=1)
                             progress.advance(current_line_progress, advance=1)
 
+                            # 关键词打完，弹出补全提示
+                            if trigger_column is not None and column == trigger_column:
+                                showAutocomplete(trigger_keyword)
+
+                            # 汉字打出，弹出输入法候选框（每个连续汉字串的首字触发）
+                            if Parameters.chinese_ime:
+                                ch = self.code_str_lines[line][column]
+                                if is_cjk(ch):
+                                    prev_ch = self.code_str_lines[line][column - 1] if column > 0 else ""
+                                    if not is_cjk(prev_ch):
+                                        pinyin, cands = get_ime(self.code_str_lines[line], column)
+                                        if cands:
+                                            showIme(pinyin, cands)
+
                         progress.remove_task(current_line_progress)
                     progress.remove_task(total_progress)
 
-                scene.wait()
+                # 代码打完后的删除动画
+                if Parameters.clear_code:
+                    # 删除前先把镜头拉回整段代码的全貌并固定，
+                    # 否则退格删除时镜头还停在最后一个字符处，看起来像"跟着镜头一起删"
+                    frame = scene.camera.frame
+                    code_center = code_mobject.get_center()
+                    fit_h = code_mobject.get_height() * 1.4 + 1.5
+                    fit_w = code_mobject.get_width() * 1.4 + 1.5
+                    aspect = frame.get_width() / frame.get_height()
+                    need_h = max(fit_h, fit_w / aspect)
+                    scene.play(
+                        frame.animate.move_to(code_center).set_height(need_h),
+                        run_time=0.6,
+                        rate_func=rate_functions.ease_in_out_cubic,
+                    )
+
+                    if Parameters.clear_code_mode == "backspace":
+                        # 像按退格一样，逐字符反向删除
+                        for mobject in reversed(typed_mobjects):
+                            cursor.next_to(mobject, RIGHT, buff=DEFAULT_CURSOR_TO_CHAR_BUFFER).set_y(code_line_rectangle.get_y())
+                            scene.play(
+                                FadeOut(mobject),
+                                run_time=Parameters.clear_code_interval,
+                                rate_func=rate_functions.linear
+                            )
+                        # 最后清掉行号、光标和行高亮框
+                        scene.play(
+                            FadeOut(VGroup(line_number_mobject, cursor, code_line_rectangle)),
+                            run_time=Parameters.clear_code_run_time,
+                            rate_func=rate_functions.ease_in_out_cubic
+                        )
+                    else:
+                        # 整体淡出
+                        scene.play(
+                            FadeOut(VGroup(code_mobject, line_number_mobject, cursor, code_line_rectangle)),
+                            run_time=Parameters.clear_code_run_time,
+                            rate_func=rate_functions.ease_in_out_cubic
+                        )
+
+                scene.wait(Parameters.end_wait_time)
 
             def render(scene):
                 """Override render to add timing log."""
@@ -322,6 +596,7 @@ class CameraFollowCursorCV:
                 # 恢复配置
                 config.disable_caching = self.origin_config['disable_caching']
                 config.renderer = self.origin_config['renderer']
+                config.background_color = self.origin_config['background_color']
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log("Manim's config has been restored.")
                 del self.origin_config
@@ -329,8 +604,8 @@ class CameraFollowCursorCV:
                     DEFAULT_OUTPUT_CONSOLE.log(f"Start adding glow effect to CameraFollowCursorCVScene.mp4. [dim](by moviepy)[/]\n")
 
                 # 添加发光效果
-                input_path = str(scene.renderer.file_writer.movie_file_path)
-                output_path = '\\'.join(input_path.split('\\')[:-1]) + rf'\{Parameters.video_name}.mp4'
+                input_path = Path(scene.renderer.file_writer.movie_file_path)
+                output_path = str(input_path.with_name(f"{Parameters.video_name}.mp4"))
                 total_effect_time = timeit(lambda: addGlowEffect(input_path=input_path, output_path=output_path, output=self.output), number=1)
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log(f"Successfully added glow effect in {total_effect_time:,.2f} seconds. [dim](by moviepy)[/]")
