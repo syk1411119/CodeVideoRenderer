@@ -2,7 +2,7 @@ from manim import config
 from rich.console import Console
 import sys
 
-# 原始标准输出和标准错误流
+# Original standard output and standard error streams
 ORIGINAL_STDOUT = sys.stdout
 """Original standard output stream, used for console output."""
 ORIGINAL_STDERR = sys.stderr
@@ -10,7 +10,7 @@ ORIGINAL_STDERR = sys.stderr
 ORIGINAL_PROGRESS_BAR = config.progress_bar
 """Original progress bar, used for progress tracking."""
 
-# 默认设置
+# Default settings
 DEFAULT_OUTPUT_VALUE = True
 """Default output value."""
 DEFAULT_LINE_SPACING = 0.8
@@ -34,7 +34,7 @@ DEFAULT_OUTPUT_CONSOLE = Console(file=ORIGINAL_STDOUT)
 DEFAULT_CURSOR_BLINK_RUN_TIME = 0.5
 """Default cursor blink animation run time."""
 
-# 其他设置
+# Other settings
 CODE_OFFSET = 0.08
 """Default offset for code rendering."""
 NOT_AVAILABLE_CHARACTERS = '\r\v\f'

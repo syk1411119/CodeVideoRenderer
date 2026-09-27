@@ -1,8 +1,9 @@
-"""VS Code 视觉风格：语法高亮主题 + Python 关键词拆分词法器。
+"""VS Code visual style: syntax-highlighting theme + Python keyword-splitting lexer.
 
-提供与 VS Code "Dark+" 主题一致的语法高亮配色，以及一个把 Python 关键词
-拆分成 ``Keyword.Declaration``（def/class，蓝色）与 ``Keyword.Reserved``
-（if/for/return…，紫色）的词法器，使渲染结果尽量贴近真实的 VS Code。
+Provides syntax-highlighting colors matching VS Code's "Dark+" theme, plus a lexer
+that splits Python keywords into ``Keyword.Declaration`` (def/class, blue) and
+``Keyword.Reserved`` (if/for/return…, purple) so the rendered output closely
+resembles real VS Code.
 """
 from __future__ import annotations
 
@@ -26,52 +27,52 @@ __all__ = [
 STYLE_NAME = "vscode-dark-plus"
 LEXER_NAME = "python-vscode"
 
-# 需要翻译成 VS Code 词法器的 Python 语言别名
+# Python language aliases to map onto the VS Code lexer
 PYTHON_LANGUAGES = {"python", "python3", "py", "py3", "python2", "py2"}
 
 
 def resolve_language(language: str) -> str:
-    """把标准 Python 语言名翻译成 VS Code 词法器名，其它语言原样返回。"""
+    """Map standard Python language names to the VS Code lexer; return other languages unchanged."""
     return LEXER_NAME if language in PYTHON_LANGUAGES else language
 
 
 class VSCodeDarkPlusStyle(Style):
-    """Pygments 风格，配色与 VS Code 默认 Dark+ 主题一致。"""
+    """Pygments style whose colors match VS Code's default Dark+ theme."""
 
     name = STYLE_NAME
     background_color = "#1E1E1E"
     styles = {
         Token: "#D4D4D4",
         Whitespace: "",
-        # 注释
+        # Comments
         Comment: "#6A9955",
         Comment.Preproc: "#C586C0",
-        # 关键词：def/class/lambda 蓝，控制流（if/for/return…）紫
+        # Keywords: def/class/lambda blue; control flow (if/for/return…) purple
         Keyword: "#569CD6",
         Keyword.Constant: "#569CD6",       # None / True / False
         Keyword.Declaration: "#569CD6",    # def / class / lambda
         Keyword.Reserved: "#C586C0",       # if / for / return / import …
         Keyword.Namespace: "#569CD6",
         Keyword.Type: "#4EC9B0",
-        # 操作符
+        # Operators
         Operator: "#D4D4D4",
         Operator.Word: "#C586C0",          # and / or / not / in / is
-        # 名称
+        # Names
         Name: "#D4D4D4",
         Name.Builtin: "#DCDCAA",           # print / len / range …
         Name.Builtin.Pseudo: "#9CDCFE",    # self / cls
-        Name.Function: "#DCDCAA",          # 函数名
-        Name.Function.Magic: "#DCDCAA",    # __init__ 等
-        Name.Class: "#4EC9B0",             # 类名
+        Name.Function: "#DCDCAA",          # function names
+        Name.Function.Magic: "#DCDCAA",    # __init__ etc.
+        Name.Class: "#4EC9B0",             # class names
         Name.Namespace: "#4EC9B0",
         Name.Exception: "#4EC9B0",
         Name.Decorator: "#DCDCAA",         # @decorator
-        Name.Variable: "#9CDCFE",          # 变量
+        Name.Variable: "#9CDCFE",          # variables
         Name.Constant: "#9CDCFE",
         Name.Attribute: "#9CDCFE",
         Name.Tag: "#569CD6",
         Name.Label: "#9CDCFE",
-        # 字符串
+        # Strings
         String: "#CE9178",
         String.Doc: "#CE9178",
         String.Interpol: "#CE9178",
@@ -79,9 +80,9 @@ class VSCodeDarkPlusStyle(Style):
         String.Regex: "#CE9178",
         String.Symbol: "#CE9178",
         String.Other: "#CE9178",
-        # 数字
+        # Numbers
         Number: "#B5CEA8",
-        # 其它
+        # Other
         Punctuation: "#D4D4D4",
         Literal: "#B5CEA8",
         Generic: "#D4D4D4",
@@ -89,7 +90,7 @@ class VSCodeDarkPlusStyle(Style):
     }
 
 
-# VS Code 中呈现为紫色（control）的关键词；其余普通关键词为蓝色（def/class）
+# Keywords shown purple (control) in VS Code; the rest are blue (def/class)
 _CONTROL_KEYWORDS = {
     "if", "elif", "else", "for", "while", "return", "break", "continue",
     "pass", "raise", "try", "except", "finally", "with", "assert",
@@ -99,7 +100,7 @@ _CONTROL_KEYWORDS = {
 
 
 class _VSKeywordFilter(Filter):
-    """把纯 ``Keyword`` token 拆成 Declaration（蓝）与 Reserved（紫）。"""
+    """Split plain ``Keyword`` tokens into Declaration (blue) and Reserved (purple)."""
 
     def filter(self, lexer, stream):
         for ttype, value in stream:
@@ -113,7 +114,7 @@ class _VSKeywordFilter(Filter):
 
 
 class VSCodePythonLexer(PythonLexer):
-    """Python 词法器：额外区分 def/class（蓝）与控制流关键词（紫）。"""
+    """Python lexer that additionally separates def/class (blue) from control-flow keywords (purple)."""
 
     name = "Python (VS Code)"
     aliases = [LEXER_NAME]
@@ -128,7 +129,7 @@ _registered = False
 
 
 def register_vscode():
-    """把自定义风格与词法器注册进 Pygments（幂等，失败时静默降级）。"""
+    """Register the custom style and lexer with Pygments (idempotent; silently degrades on failure)."""
     global _registered
     if _registered:
         return
@@ -150,7 +151,7 @@ def register_vscode():
         _lexer_cache[VSCodePythonLexer.name] = VSCodePythonLexer
         _registered = True
     except Exception:
-        # 注册失败不影响库本身，只是退回到 Pygments 自带的 python 词法器
+        # Registration failure does not affect the library; it just falls back to Pygments' built-in python lexer
         _registered = False
 
 

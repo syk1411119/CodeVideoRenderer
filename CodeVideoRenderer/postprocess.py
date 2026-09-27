@@ -172,7 +172,7 @@ def _drawtext_escape(text: str) -> str:
 def _default_font() -> str:
     """Return a font file that supports CJK when available, else empty (ffmpeg default)."""
     candidates = [
-        r"C:\Windows\Fonts\msyh.ttc",  # 微软雅黑
+        r"C:\Windows\Fonts\msyh.ttc",  # Microsoft YaHei
         r"C:\Windows\Fonts\msyh.ttf",
         r"C:\Windows\Fonts\simhei.ttf",
         r"C:\Windows\Fonts\simsun.ttc",
@@ -416,7 +416,7 @@ def concat_videos(
         n = len(paths)
         has_audio_flags = [_has_audio_stream(p) for p in paths]
 
-        # 视频流统一成 yuv420p，避免不同像素格式导致 concat 失败
+        # Normalize video streams to yuv420p so differing pixel formats do not break concat
         v_parts = [f"[{i}:v]format=yuv420p[v{i}]" for i in range(n)]
 
         if all(has_audio_flags):
@@ -710,7 +710,7 @@ def add_title_card(
         title_clip = Path(tmp) / "title.mp4"
         has_audio = _has_audio_stream(input_path)
 
-        # 片头音轨状态与原视频保持一致，确保 concat(reencode) 能顺利拼接
+        # Keep the title card's audio stream consistent with the source video so concat(reencode) joins cleanly
         title_args: List[str] = [
             "-f", "lavfi",
             "-i", f"color=c={background_color}:s={width}x{height}:d={duration}:r={fps}",

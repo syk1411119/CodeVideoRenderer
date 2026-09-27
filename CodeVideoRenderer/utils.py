@@ -52,20 +52,20 @@ def stripEmptyLines(text: str) -> str:
 
     Args:
         text (str): The input string to process.
-        
+
     Returns:
         str: The string with empty lines removed from the beginning and end.
     """
     lines = text.split("\n")
-    
+
     start = 0
     while start < len(lines) and lines[start].strip() == '':
         start += 1
-    
+
     end = len(lines)
     while end > start and lines[end - 1].strip() == '':
         end -= 1
-    
+
     return '\n'.join(lines[start:end])
 
 def typeName(item_type: Any) -> str:
@@ -74,20 +74,20 @@ def typeName(item_type: Any) -> str:
 
     Args:
         item_type: The type or value to get the name of.
-        
+
     Returns:
         str: The name of the type.
     """
     # Handle UnionType
     if isinstance(item_type, UnionType):
         return str(item_type).replace(" | ", "' or '")
-    
+
     # Handle non-type objects (like Literal values)
     if not isinstance(item_type, type):
         if isinstance(item_type, str):
             return f"'{item_type}'"
         return str(item_type)
-    
+
     # Handle generic types
     origin = get_origin(item_type)
     if origin:
@@ -96,7 +96,7 @@ def typeName(item_type: Any) -> str:
             arg_names = ', '.join([typeName(arg) for arg in args])
             return f"{origin.__name__}[{arg_names}]"
         return origin.__name__
-    
+
     # Handle basic types
     return item_type.__name__
 
@@ -108,34 +108,34 @@ def addGlowEffect(input_path: StrPath, output_path: StrPath, output: bool) -> No
         input_path (StrPath): Path to the input video file.
         output_path (StrPath): Path to save the output video file.
         output (bool): Whether to display progress bars.
-        
+
     Returns:
         None
     """
-    # 内部帧处理函数
+    # Inner frame-processing function
     def _frame_glow(t: np.ndarray):
-        # 获取MoviePy的numpy帧并转为PIL图像
+        # Get the MoviePy numpy frame and convert it to a PIL image
         frame = t.astype(np.uint8)
         pil_img = Image.fromarray(frame).convert("RGBA")
 
-        # 提升基础亮度
+        # Boost base brightness
         brightness_enhancer = ImageEnhance.Brightness(pil_img)
         pil_img = brightness_enhancer.enhance(1.2)
 
-        # 创建模糊光晕层
+        # Create the blurred glow layer
         glow = pil_img.filter(ImageFilter.GaussianBlur(radius=10))
 
-        # 提升光晕的亮度和饱和度
+        # Boost the glow's brightness and saturation
         glow_bright_enhancer = ImageEnhance.Brightness(glow)
         glow = glow_bright_enhancer.enhance(1.6)
         glow_color_enhancer = ImageEnhance.Color(glow)
         glow = glow_color_enhancer.enhance(2)
 
-        # 混合原图像与光晕层
+        # Blend the original image with the glow layer
         soft_glow_img = Image.blend(glow, pil_img, 0.4)
         glow_frame = np.array(soft_glow_img.convert("RGB")).astype(np.uint8)
         return np.clip(glow_frame, 0, 255)
-    
+
     glow_video: VideoFileClip = VideoFileClip(input_path).image_transform(_frame_glow)
     glow_video.write_videofile(output_path, codec='libx264', audio=True, logger=RichProgressBarLogger(output=output, title="Glow Effect", leave_bars=False))
 
@@ -143,45 +143,45 @@ def findSpacePositions(string: str) -> List[List[int]]:
     """
     Find the 2D positions of all non-leading, non-trailing spaces in a string.
     Each position is represented as a list ``[row_index, column_index]``.
-    
+
     Args:
         string (str): A string.
-        
+
     Returns:
         List[List[int]]: A list of 2D positions of all non-leading, non-trailing spaces.
         Each position is represented as a list ``[row_index, column_index]``.
     """
-    result = []  # 存储所有[行, 列]格式的空格位置
+    result = []  # Store all space positions in [row, col] form
     for row_idx, s in enumerate(string.splitlines()):
-        # 找到第一个非空格字符的列索引
+        # Find the column index of the first non-space character
         first_non_space = 0
         while first_non_space < len(s) and s[first_non_space] == ' ':
             first_non_space += 1
-        
-        # 找到最后一个非空格字符的列索引
+
+        # Find the column index of the last non-space character
         last_non_space = len(s) - 1
         while last_non_space >= 0 and s[last_non_space] == ' ':
             last_non_space -= 1
-        
-        # 全空格/空字符串，跳过
+
+        # All spaces / empty string; skip
         if first_non_space > last_non_space:
-            result.extend([[row_idx, col_idx] for col_idx in range(len(s))])  # 记录整行空格位置
+            result.extend([[row_idx, col_idx] for col_idx in range(len(s))])  # Record the whole line's space positions
             continue
-        
-        # 遍历中间部分，收集[行, 列]格式的位置
+
+        # Scan the middle section and collect [row, col] positions
         for col_idx in range(first_non_space, last_non_space + 1):
             if s[col_idx] == ' ':
                 result.append([row_idx, col_idx])
-    
+
     return result
 
 def findEmptyLinePositions(string: str) -> List[int]:
     """
     Find the line indices of all empty lines in a string.
-    
+
     Args:
         string (str): A string.
-        
+
     Returns:
         List[int]: A list of line indices of all empty lines.
     """
@@ -191,51 +191,51 @@ def replaceMiddleSpacesWithOccupyCharacter(string: str) -> str:
     """
     Replace all non-leading, non-trailing spaces in the input string with :data:`~.OCCUPY_CHARACTER`.
     Retain leading and trailing spaces.
-    
+
     Args:
         string (str): Original string.
-        
+
     Returns:
         str: Processed string with middle spaces replaced by :data:`~.OCCUPY_CHARACTER`.
     """
     result = []
     for s in string.splitlines():
-        # 处理非字符串元素，直接保留原元素
+        # Keep non-string elements as-is
         if not isinstance(s, str):
             result.append(s)
             continue
-        
-        # 空字符串直接保留
+
+        # Keep empty strings as-is
         if len(s) == 0:
             result.append(s)
             continue
-        
-        # 转为列表方便修改字符
+
+        # Convert to a list so characters can be modified
         s_list = list(s)
-        
-        # 找到第一个非空格字符的索引
+
+        # Find the index of the first non-space character
         first_non_space = 0
         while first_non_space < len(s_list) and s_list[first_non_space] == ' ':
             first_non_space += 1
-        
-        # 找到最后一个非空格字符的索引
+
+        # Find the index of the last non-space character
         last_non_space = len(s_list) - 1
         while last_non_space >= 0 and s_list[last_non_space] == ' ':
             last_non_space -= 1
-        
-        # 全是空格的情况，直接保留原字符串
+
+        # All spaces: keep the original string unchanged
         if first_non_space > last_non_space:
             result.append(s.replace(' ', OCCUPY_CHARACTER))
             continue
-        
-        # 遍历中间区域，替换空格为1
+
+        # Scan the middle region and replace spaces with the occupy character
         for idx in range(first_non_space, last_non_space + 1):
             if s_list[idx] == ' ':
                 s_list[idx] = OCCUPY_CHARACTER
-        
-        # 转回字符串并加入结果
+
+        # Convert back to a string and append to the result
         result.append(''.join(s_list))
-    
+
     return '\n'.join(result)
 
 class DefaultProgressBar(Progress):
@@ -296,7 +296,7 @@ class RichProgressBarLogger(ProgressBarLogger):
             min_time_interval (float): Minimum update interval in seconds.
             ignore_bars_under (int): Ignore bars with fewer than this many items.
         """
-        # 调用父类构造函数，初始化核心属性
+        # Call the parent constructor to initialize core attributes
         super().__init__(
             init_state=init_state,
             bars=bars,
@@ -305,19 +305,19 @@ class RichProgressBarLogger(ProgressBarLogger):
             ignore_bars_under=ignore_bars_under,
             min_time_interval=min_time_interval, # type: ignore
         )
-        
-        # 初始化自定义属性
+
+        # Initialize custom attributes
         self.leave_bars = leave_bars
         self.print_messages = print_messages
         self.output = output
         self.title = title
         self.start_time = time.time()
-        
-        # 初始化 Rich 进度条
+
+        # Initialize the Rich progress bar
         self.progress_bar = copy(DefaultProgressBar(self.output))
-        self.rich_bars = OrderedDict()  # 存储 {bar_name: task_id}
-        
-        # 启动 Rich 进度条
+        self.rich_bars = OrderedDict()  # Store {bar_name: task_id}
+
+        # Start the Rich progress bar
         if self.progress_bar and not self.progress_bar.live.is_started:
             self.progress_bar.start()
 
@@ -327,14 +327,14 @@ class RichProgressBarLogger(ProgressBarLogger):
         """
         if not self.output or self.progress_bar is None:
             return
-        
-        # 关闭已有进度条
+
+        # Close any existing progress bar
         if bar in self.rich_bars:
             self.close_tqdm_bar(bar)
-        
-        # 获取父类维护的进度条信息
+
+        # Get the progress-bar info maintained by the parent class
         infos = self.bars[bar]
-        # 创建 Rich 进度条任务
+        # Create a Rich progress-bar task
         task_id = self.progress_bar.add_task(description=f"[yellow]{self.title}[/yellow]", total=infos["total"])
         self.rich_bars[bar] = task_id
 
@@ -344,10 +344,10 @@ class RichProgressBarLogger(ProgressBarLogger):
         """
         if not self.output or self.progress_bar is None:
             return
-        
+
         if bar in self.rich_bars:
             task_id = self.rich_bars[bar]
-            # 若不需要保留，移除任务
+            # Remove the task if it should not be kept
             if not self.leave_bars:
                 self.progress_bar.remove_task(task_id)
             del self.rich_bars[bar]
@@ -365,25 +365,25 @@ class RichProgressBarLogger(ProgressBarLogger):
         if task_id is None:
             return
         if attr == "index":
-            # 处理帧数更新（核心）
+            # Handle frame-count updates (core)
             if value >= old_value:
                 total = self.bars[bar]["total"]
-                # 计算处理速度
+                # Calculate processing speed
                 elapsed = time.time() - self.start_time
                 speed = value / elapsed if elapsed > 0 else 0.0
-                
-                # 更新 Rich 进度条
+
+                # Update the Rich progress bar
                 self.progress_bar.update(
                     task_id, # type: ignore
                     completed=value,
                     speed=speed
                 )
-                
-                # 完成后关闭（复刻原逻辑）
+
+                # Close once complete (mirror the original logic)
                 if total and (value >= total):
                     self.close_tqdm_bar(bar)
             else:
-                # 帧数回退：重置进度条
+                # Frame-count rollback: reset the progress bar
                 self.new_tqdm_bar(bar)
                 self.progress_bar.update(self.rich_bars[bar], completed=value)
 
