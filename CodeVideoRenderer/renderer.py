@@ -357,33 +357,45 @@ class CameraFollowCursorCV:
                         rows = []
                         for label, kind, detail in suggestions:
                             glyph, color = AUTOCOMPLETE_KIND_STYLE.get(kind, ("▣", "#75BEFF"))
-                            icon = Text(glyph, font="CodeVideoRendererFont", font_size=20, color=color)
-                            label_t = Text(label, font="CodeVideoRendererFont", font_size=30, color=_SUGGEST_FG)
-                            detail_t = Text(detail, font="CodeVideoRendererFont", font_size=22, color=_SUGGEST_DETAIL)
+                            icon = Text(glyph, font="CodeVideoRendererFont", font_size=16, color=color)
+                            label_t = Text(label, font="CodeVideoRendererFont", font_size=20, color=_SUGGEST_FG)
+                            detail_t = Text(detail, font="CodeVideoRendererFont", font_size=16, color=_SUGGEST_DETAIL)
                             rows.append((icon, label_t, detail_t))
 
-                    left_parts, detail_parts = [], []
-                    for icon, label_t, detail_t in rows:
-                        left_parts.append(VGroup(icon, label_t).arrange(RIGHT, aligned_edge=DOWN, buff=0.18))
-                        detail_parts.append(detail_t)
-                    left_col = VGroup(*left_parts).arrange(DOWN, aligned_edge=LEFT, buff=0.16)
-                    detail_col = VGroup(*detail_parts).arrange(DOWN, aligned_edge=RIGHT, buff=0.16)
-                    detail_col.next_to(left_col, RIGHT, buff=1.2)
+                    # Compact, row-aligned layout: icon + label on the left, detail right-aligned.
+                    pad_x, pad_y = 0.22, 0.15
+                    icon_gap, detail_gap, row_buff = 0.12, 0.5, 0.12
+                    lefts = [VGroup(ic, lb).arrange(RIGHT, aligned_edge=DOWN, buff=icon_gap) for ic, lb, _ in rows]
+                    details = [dt for _, _, dt in rows]
 
-                    content = VGroup(left_col, detail_col)
-                    box = SurroundingRectangle(
-                        content, color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG,
-                        fill_opacity=1, stroke_width=1, buff=0.3, corner_radius=0.08,
+                    max_left_w = max(l.width for l in lefts)
+                    max_detail_w = max(d.width for d in details)
+                    row_h = max(l.height for l in lefts)
+                    row_step = row_h + row_buff
+
+                    box = RoundedRectangle(
+                        width=max_left_w + detail_gap + max_detail_w + 2 * pad_x,
+                        height=row_h * len(rows) + row_buff * (len(rows) - 1) + 2 * pad_y,
+                        corner_radius=0.06,
+                        color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG, fill_opacity=1, stroke_width=1,
                     )
-                    # Highlight the whole row of the first (selected) item
-                    first = left_col[0]
-                    sel = Rectangle(
-                        width=box.get_width() - 0.55, height=first.get_height() + 0.16,
-                        color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
-                    ).move_to([box.get_x(), first.get_y(), 0])
 
-                    popup = VGroup(box, sel, left_col, detail_col)
-                    popup.next_to(cursor, DOWN, buff=0.4).shift(RIGHT * 0.5)
+                    content_left = box.get_left()[0] + pad_x
+                    content_right = box.get_right()[0] - pad_x
+                    top_y = box.get_top()[1] - pad_y
+                    for i, (left, detail_t) in enumerate(zip(lefts, details)):
+                        row_y = top_y - row_step * i - row_h / 2
+                        left.move_to([content_left + left.width / 2, row_y, 0])
+                        detail_t.move_to([content_right - detail_t.width / 2, row_y, 0])
+
+                    # Highlight the whole row of the first (selected) item
+                    sel = Rectangle(
+                        width=box.width - 0.1, height=row_step,
+                        color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
+                    ).move_to([box.get_x(), lefts[0].get_y(), 0])
+
+                    popup = VGroup(box, sel, *lefts, *details)
+                    popup.next_to(cursor, DOWN, buff=0.3)
 
                     scene.add(popup)
                     scene.play(FadeIn(popup), run_time=0.12)
@@ -395,20 +407,27 @@ class CameraFollowCursorCV:
                     if not candidates:
                         return
                     with register_font(font_path):
-                        py_t = Text(pinyin, font="CodeVideoRendererFont", font_size=24, color="#9CDCFE")
-                        cands = [Text(c, font="CodeVideoRendererFont", font_size=30, color="#808080") for c in candidates]
+                        py_t = Text(pinyin, font="CodeVideoRendererFont", font_size=18, color="#9CDCFE")
+                        cands = [Text(c, font="CodeVideoRendererFont", font_size=20, color="#808080") for c in candidates]
                     cands[0].set_color(_SUGGEST_FG)
-                    cand_row = VGroup(*cands).arrange(RIGHT, aligned_edge=UP, buff=0.35)
+
+                    cand_row = VGroup(*cands).arrange(RIGHT, aligned_edge=UP, buff=0.22)
                     inner_w = max(py_t.get_width(), cand_row.get_width())
                     bar = Rectangle(width=inner_w, height=0.03, fill_color=_SUGGEST_BORDER, fill_opacity=1, stroke_width=0)
-                    content = VGroup(py_t, bar, cand_row).arrange(DOWN, aligned_edge=LEFT, buff=0.14)
-                    first_hl = SurroundingRectangle(cands[0], color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0, buff=0.08)
-                    box = SurroundingRectangle(
-                        content, color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG,
-                        fill_opacity=1, stroke_width=1, buff=0.3, corner_radius=0.08,
+                    content = VGroup(py_t, bar, cand_row).arrange(DOWN, aligned_edge=LEFT, buff=0.12)
+
+                    first_hl = Rectangle(
+                        width=cands[0].width + 0.18, height=cands[0].height + 0.12,
+                        color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
+                    ).move_to(cands[0])
+
+                    box = RoundedRectangle(
+                        width=inner_w + 0.44, height=content.height + 0.3,
+                        corner_radius=0.06,
+                        color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG, fill_opacity=1, stroke_width=1,
                     )
                     popup = VGroup(box, first_hl, py_t, bar, cand_row)
-                    popup.next_to(cursor, DOWN, buff=0.4).shift(RIGHT * 0.5)
+                    popup.next_to(cursor, DOWN, buff=0.3)
 
                     scene.add(popup)
                     scene.play(FadeIn(popup), run_time=0.12)
