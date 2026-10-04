@@ -1,19 +1,20 @@
 """PyQt5 GUI for CodeVideoRenderer: write code, configure effects, render a typing video."""
+import re
 import sys
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QThread, QSize, QRect, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QSize, QRect, QUrl, QRegularExpression, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QSyntaxHighlighter, QTextCharFormat,
-    QTextFormat, QKeySequence,
+    QTextFormat, QKeySequence, QDesktopServices,
 )
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPlainTextEdit, QComboBox, QLineEdit, QCheckBox, QPushButton, QLabel,
     QFormLayout, QScrollArea, QSpinBox, QDoubleSpinBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QTextBrowser, QAbstractItemView,
-    QHeaderView, QTextEdit,
+    QHeaderView, QTextEdit, QColorDialog,
 )
 
 from CodeVideoRenderer import (
@@ -21,12 +22,22 @@ from CodeVideoRenderer import (
     replace_background, add_sound, add_subtitles, add_lyrics, add_watermark,
 )
 
-EDITOR_BG = "#1e1e1e"
-EDITOR_FG = "#d4d4d4"
-EDITOR_SELECTION = "#264f78"
-EDITOR_CURRENT_LINE = "#2a2d2e"
-EDITOR_GUTTER = "#252526"
-EDITOR_GUTTER_FG = "#858585"
+# One Dark Pro Darker (matches the renderer's default output)
+EDITOR_BG = "#23272e"
+EDITOR_FG = "#abb2bf"
+EDITOR_SELECTION = "#3d4556"
+EDITOR_CURRENT_LINE = "#2c313c"
+EDITOR_GUTTER = "#23272e"
+EDITOR_GUTTER_FG = "#7f848e"
+
+# VS Code Dark+ syntax colors (matches the renderer's formatter_style="vscode-dark-plus")
+C_KEYWORD = "#C586C0"
+C_DECL = "#569CD6"
+C_STRING = "#CE9178"
+C_COMMENT = "#6A9955"
+C_NUMBER = "#B5CEA8"
+C_FUNC = "#DCDCAA"
+C_BUILTIN = "#9CDCFE"
 
 LANGUAGES = [
     "python", "javascript", "typescript", "cpp", "c", "java", "go", "rust",
@@ -34,61 +45,393 @@ LANGUAGES = [
     "csharp", "kotlin", "swift", "r", "matlab", "yaml", "xml",
 ]
 
+QUALITIES = ["low_quality", "medium_quality", "high_quality", "fourk_quality"]
+
 POSITIONS = [
     "bottom-left", "bottom-center", "bottom-right",
     "middle-left", "middle-center", "middle-right",
     "top-left", "top-center", "top-right",
 ]
 
-PY_CONTROL_KEYWORDS = [
-    "if", "elif", "else", "for", "while", "return", "break", "continue",
-    "pass", "try", "except", "finally", "raise", "with", "yield", "assert",
-    "in", "is", "not", "and", "or",
-]
+# Per-language highlighting specs. Keys:
+#   line_comment: regex or None
+#   block_comment: (start, end) or None
+#   strings: list of regexes
+#   kw: control keywords (purple)
+#   decl: declaration/type keywords (blue)
+#   builtin: builtins/types/constants (light blue)
+#   func: keywords that introduce a function/class/type name (captured, yellow)
+LANG_SPECS = {
+    "python": {
+        "line_comment": r"#[^\n]*",
+        "block_comment": ('"""', '"""'),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["if", "elif", "else", "for", "while", "return", "break", "continue",
+               "pass", "try", "except", "finally", "raise", "with", "yield", "assert",
+               "in", "is", "not", "and", "or", "import", "from", "as", "lambda",
+               "global", "nonlocal", "del", "await", "async"],
+        "decl": ["def", "class"],
+        "builtin": ["print", "len", "range", "str", "int", "float", "bool", "list", "dict",
+                    "set", "tuple", "type", "isinstance", "enumerate", "zip", "map", "filter",
+                    "sum", "min", "max", "abs", "round", "open", "input", "super", "self",
+                    "cls", "True", "False", "None"],
+        "func": ["def", "class"],
+    },
+    "javascript": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'", r"`[^`\\]*(?:\\.[^`\\]*)*`"],
+        "kw": ["break", "case", "catch", "class", "const", "continue", "debugger", "default",
+               "delete", "do", "else", "export", "extends", "finally", "for", "function",
+               "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
+               "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+               "async", "await", "static", "get", "set", "of"],
+        "decl": [],
+        "builtin": ["console", "document", "window", "Math", "JSON", "Object", "Array",
+                    "String", "Number", "Boolean", "Promise", "undefined", "null", "true",
+                    "false", "NaN", "Infinity"],
+        "func": ["function", "class"],
+    },
+    "typescript": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'", r"`[^`\\]*(?:\\.[^`\\]*)*`"],
+        "kw": ["break", "case", "catch", "class", "const", "continue", "default", "delete",
+               "do", "else", "export", "extends", "finally", "for", "function", "if",
+               "import", "in", "instanceof", "let", "new", "return", "super", "switch",
+               "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+               "async", "await", "static", "get", "set", "of", "keyof", "infer", "namespace",
+               "declare", "readonly", "implements"],
+        "decl": ["interface", "type", "enum", "abstract"],
+        "builtin": ["string", "number", "boolean", "any", "void", "never", "unknown", "symbol",
+                    "console", "document", "window", "Math", "JSON", "undefined", "null",
+                    "true", "false"],
+        "func": ["function", "class", "interface", "enum"],
+    },
+    "cpp": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["auto", "break", "case", "const", "continue", "default", "do", "else", "enum",
+               "extern", "for", "goto", "if", "inline", "register", "return", "sizeof",
+               "static", "struct", "switch", "typedef", "union", "volatile", "while", "class",
+               "namespace", "template", "typename", "new", "delete", "this", "virtual",
+               "override", "final", "public", "private", "protected", "friend", "operator",
+               "using", "throw", "try", "catch", "nullptr", "constexpr", "noexcept"],
+        "decl": ["int", "float", "double", "char", "bool", "void", "long", "short", "unsigned",
+                 "signed", "size_t", "wchar_t"],
+        "builtin": ["std", "cout", "cin", "endl", "printf", "scanf", "malloc", "free",
+                    "NULL", "true", "false"],
+        "func": [],
+    },
+    "c": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["auto", "break", "case", "const", "continue", "default", "do", "else", "enum",
+               "extern", "for", "goto", "if", "inline", "register", "return", "sizeof",
+               "static", "struct", "switch", "typedef", "union", "volatile", "while"],
+        "decl": ["int", "float", "double", "char", "void", "long", "short", "unsigned",
+                 "signed", "size_t"],
+        "builtin": ["printf", "scanf", "malloc", "free", "NULL", "FILE", "EOF"],
+        "func": [],
+    },
+    "java": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["abstract", "assert", "break", "case", "catch", "class", "continue", "default",
+               "do", "else", "enum", "extends", "final", "finally", "for", "if", "implements",
+               "import", "instanceof", "interface", "native", "new", "package", "private",
+               "protected", "public", "return", "static", "super", "switch", "synchronized",
+               "this", "throw", "throws", "try", "volatile", "while", "record", "var", "yield"],
+        "decl": ["int", "float", "double", "char", "boolean", "byte", "short", "long", "void"],
+        "builtin": ["String", "Object", "Integer", "List", "Map", "System", "out", "true",
+                    "false", "null"],
+        "func": ["class", "interface", "enum", "record"],
+    },
+    "go": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'", r"`[^`]*`"],
+        "kw": ["break", "case", "chan", "const", "continue", "default", "defer", "else",
+               "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
+               "package", "range", "return", "select", "struct", "switch", "type", "var"],
+        "decl": ["string", "int", "float64", "float32", "bool", "byte", "rune", "error"],
+        "builtin": ["append", "cap", "close", "complex", "copy", "delete", "imag", "len",
+                    "make", "new", "panic", "print", "println", "real", "recover", "nil",
+                    "true", "false"],
+        "func": ["func", "type"],
+    },
+    "rust": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["as", "break", "const", "continue", "crate", "else", "enum", "extern", "for",
+               "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+               "return", "self", "Self", "static", "struct", "super", "trait", "type", "unsafe",
+               "use", "where", "while", "async", "await", "dyn", "union", "fn"],
+        "decl": ["i32", "i64", "u32", "u64", "f32", "f64", "bool", "char", "str", "usize",
+                 "isize"],
+        "builtin": ["println", "print", "vec", "Some", "None", "Ok", "Err", "String", "Vec",
+                    "Option", "Result", "Box", "true", "false"],
+        "func": ["fn", "struct", "enum", "trait", "impl"],
+    },
+    "html": {
+        "line_comment": None,
+        "block_comment": ("<!--", "-->"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
+               "table", "tr", "td", "th", "form", "input", "button", "select", "option",
+               "textarea", "label", "h1", "h2", "h3", "h4", "h5", "h6", "script", "style",
+               "link", "meta", "title", "header", "footer", "nav", "main", "section",
+               "article", "aside", "iframe", "video", "audio", "canvas", "br", "hr", "strong",
+               "em", "code", "pre"],
+        "decl": [],
+        "builtin": [],
+        "func": [],
+    },
+    "css": {
+        "line_comment": None,
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["color", "background", "background-color", "margin", "padding", "border",
+               "width", "height", "display", "position", "top", "left", "right", "bottom",
+               "font", "font-size", "font-family", "font-weight", "text-align", "flex",
+               "grid", "gap", "justify-content", "align-items", "overflow", "z-index",
+               "opacity", "cursor", "transition", "transform", "animation", "border-radius",
+               "box-shadow", "line-height", "letter-spacing", "float", "clear", "content",
+               "visibility"],
+        "decl": [],
+        "builtin": ["none", "block", "inline", "flex", "grid", "absolute", "relative", "fixed",
+                    "sticky", "center", "auto", "inherit", "transparent"],
+        "func": [],
+    },
+    "json": {
+        "line_comment": None,
+        "block_comment": None,
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"'],
+        "kw": [],
+        "decl": [],
+        "builtin": ["true", "false", "null"],
+        "func": [],
+    },
+    "bash": {
+        "line_comment": r"#[^\n]*",
+        "block_comment": None,
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^']*'"],
+        "kw": ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case",
+               "esac", "function", "in", "select", "until", "time", "coproc"],
+        "decl": [],
+        "builtin": ["echo", "cd", "ls", "pwd", "cat", "grep", "sed", "awk", "export", "source",
+                    "exit", "return", "read", "printf", "test", "set", "unset", "shift", "local",
+                    "sudo", "mkdir", "rm", "cp", "mv", "chmod", "chown"],
+        "func": ["function"],
+    },
+    "ruby": {
+        "line_comment": r"#[^\n]*",
+        "block_comment": None,
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^']*'"],
+        "kw": ["if", "elsif", "else", "unless", "while", "until", "for", "do", "end", "begin",
+               "rescue", "ensure", "case", "when", "then", "return", "yield", "require",
+               "require_relative", "include", "extend", "and", "or", "not", "next", "break",
+               "redo", "retry", "alias", "defined"],
+        "decl": ["def", "class", "module"],
+        "builtin": ["self", "super", "nil", "true", "false", "puts", "print", "gets", "raise",
+                    "lambda", "proc", "attr_accessor", "attr_reader", "attr_writer"],
+        "func": ["def", "class", "module"],
+    },
+    "php": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["if", "else", "elseif", "for", "foreach", "while", "do", "switch", "case",
+               "break", "continue", "return", "function", "class", "interface", "trait",
+               "extends", "implements", "public", "private", "protected", "static", "final",
+               "abstract", "new", "echo", "print", "include", "require", "namespace", "use",
+               "as", "global", "const", "try", "catch", "finally", "throw", "instanceof",
+               "isset", "unset", "empty"],
+        "decl": [],
+        "builtin": ["true", "false", "null", "array", "self", "parent", "$this"],
+        "func": ["function", "class", "interface", "trait"],
+    },
+    "sql": {
+        "line_comment": r"--[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r"'[^']*'"],
+        "kw": ["select", "from", "where", "insert", "update", "delete", "create", "drop",
+               "alter", "table", "index", "view", "join", "inner", "outer", "left", "right",
+               "full", "on", "group", "by", "order", "having", "limit", "offset", "and", "or",
+               "not", "null", "in", "like", "between", "exists", "case", "when", "then",
+               "else", "end", "as", "distinct", "union", "all", "into", "values", "set",
+               "primary", "key", "foreign", "references", "default"],
+        "decl": [],
+        "builtin": ["count", "sum", "avg", "min", "max", "now", "concat", "substring"],
+        "func": [],
+    },
+    "markdown": {
+        "line_comment": None,
+        "block_comment": None,
+        "strings": [r"`[^`]*`"],
+        "kw": [],
+        "decl": [],
+        "builtin": [],
+        "func": [],
+    },
+    "lua": {
+        "line_comment": r"--[^\n]*",
+        "block_comment": ("--[[", "]]"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+               "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
+               "true", "until", "while"],
+        "decl": [],
+        "builtin": ["print", "pairs", "ipairs", "table", "string", "math", "os", "io", "type",
+                    "tostring", "tonumber", "pcall", "xpcall", "error", "assert", "select",
+                    "next", "rawget", "rawset"],
+        "func": ["function"],
+    },
+    "csharp": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["abstract", "as", "base", "break", "case", "catch", "checked", "class", "const",
+               "continue", "default", "delegate", "do", "else", "enum", "event", "explicit",
+               "extern", "finally", "fixed", "for", "foreach", "goto", "if", "implicit", "in",
+               "interface", "internal", "is", "lock", "namespace", "new", "null", "operator",
+               "out", "override", "params", "private", "protected", "public", "readonly",
+               "ref", "return", "sealed", "sizeof", "stackalloc", "static", "struct", "switch",
+               "this", "throw", "try", "typeof", "unchecked", "unsafe", "using", "virtual",
+               "volatile", "while", "var", "async", "await", "yield", "record"],
+        "decl": ["int", "float", "double", "char", "bool", "byte", "short", "long", "string",
+                 "object", "void", "decimal", "uint", "ulong", "ushort", "sbyte"],
+        "builtin": ["true", "false", "null", "nameof", "sizeof", "typeof"],
+        "func": ["class", "interface", "struct", "enum", "record"],
+    },
+    "kotlin": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if",
+               "in", "interface", "is", "null", "object", "package", "return", "super", "this",
+               "throw", "true", "try", "typealias", "typeof", "val", "var", "when", "while",
+               "by", "catch", "constructor", "finally", "get", "import", "init", "param",
+               "set", "where", "actual", "abstract", "annotation", "companion", "const",
+               "crossinline", "data", "enum", "expect", "external", "final", "infix", "inline",
+               "inner", "internal", "lateinit", "noinline", "open", "operator", "out",
+               "override", "private", "protected", "public", "reified", "sealed", "suspend",
+               "tailrec", "vararg"],
+        "decl": ["Int", "Float", "Double", "Boolean", "Char", "String", "Unit", "Any", "Nothing",
+                 "Long", "Short", "Byte", "List", "Map", "Set"],
+        "builtin": ["println", "print", "null", "true", "false"],
+        "func": ["fun", "class", "interface", "object", "data"],
+    },
+    "swift": {
+        "line_comment": r"//[^\n]*",
+        "block_comment": ("/*", "*/"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["if", "else", "for", "while", "repeat", "switch", "case", "break", "continue",
+               "return", "guard", "defer", "do", "try", "catch", "throw", "throws", "import",
+               "init", "deinit", "subscript", "typealias", "associatedtype", "inout", "lazy",
+               "weak", "unowned", "static", "final", "override", "public", "private",
+               "internal", "open", "fileprivate", "where", "as", "is", "in", "await"],
+        "decl": ["class", "struct", "enum", "protocol", "extension", "func", "var", "let"],
+        "builtin": ["Int", "Float", "Double", "String", "Bool", "Array", "Dictionary", "Set",
+                    "Optional", "self", "super", "true", "false", "nil"],
+        "func": ["func", "class", "struct", "enum", "protocol"],
+    },
+    "r": {
+        "line_comment": r"#[^\n]*",
+        "block_comment": None,
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": ["if", "else", "repeat", "while", "function", "for", "in", "next", "break"],
+        "decl": [],
+        "builtin": ["TRUE", "FALSE", "NULL", "Inf", "NaN", "NA", "print", "c", "list",
+                    "data.frame", "matrix", "length", "names"],
+        "func": ["function"],
+    },
+    "matlab": {
+        "line_comment": r"%[^\n]*",
+        "block_comment": ("%{", "%}"),
+        "strings": [r"'[^']*'"],
+        "kw": ["if", "else", "elseif", "for", "while", "end", "function", "switch", "case",
+               "otherwise", "try", "catch", "return", "break", "continue", "global", "persistent",
+               "classdef", "properties", "methods", "events"],
+        "decl": [],
+        "builtin": ["true", "false", "inf", "nan", "pi", "zeros", "ones", "eye", "size",
+                    "length", "disp", "plot", "figure", "sqrt", "abs"],
+        "func": ["function"],
+    },
+    "yaml": {
+        "line_comment": r"#[^\n]*",
+        "block_comment": None,
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^']*'"],
+        "kw": [],
+        "decl": [],
+        "builtin": ["true", "false", "null", "yes", "no", "on", "off"],
+        "func": [],
+    },
+    "xml": {
+        "line_comment": None,
+        "block_comment": ("<!--", "-->"),
+        "strings": [r'"[^"\\]*(?:\\.[^"\\]*)*"', r"'[^'\\]*(?:\\.[^'\\]*)*'"],
+        "kw": [],
+        "decl": [],
+        "builtin": [],
+        "func": [],
+    },
+}
 
-PY_KEYWORDS = [
-    "def", "class", "import", "from", "as", "lambda", "global", "nonlocal",
-    "del", "await", "async",
-]
 
-PY_BUILTINS = [
-    "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
-    "set", "tuple", "type", "isinstance", "enumerate", "zip", "map", "filter",
-    "sum", "min", "max", "abs", "round", "open", "input", "super", "self",
-    "cls", "True", "False", "None",
-]
+class SyntaxHighlighter(QSyntaxHighlighter):
+    """Language-aware syntax highlighter using VS Code Dark+ colors."""
 
-
-class PythonHighlighter(QSyntaxHighlighter):
-    def __init__(self, document):
+    def __init__(self, document, language="python"):
         super().__init__(document)
-        self.rules = []
-        self._make_fmt(self.rules, "#CE9178", None, None, r'"[^"\\]*(\\.[^"\\]*)*"')
-        self._make_fmt(self.rules, "#CE9178", None, None, r"'[^'\\]*(\\.[^'\\]*)*'")
-        self._make_fmt(self.rules, "#6A9955", None, None, r"#[^\n]*")
-        self._make_fmt(self.rules, "#B5CEA8", None, None, r"\b[0-9]+(\.[0-9]+)?\b")
-        self._make_fmt(self.rules, "#C586C0", None, None, r"\b(" + "|".join(PY_CONTROL_KEYWORDS) + r")\b")
-        self._make_fmt(self.rules, "#569CD6", None, None, r"\b(" + "|".join(PY_KEYWORDS) + r")\b")
-        self._make_fmt(self.rules, "#9CDCFE", None, None, r"\b(" + "|".join(PY_BUILTINS) + r")\b")
-        self._make_fmt(self.rules, "#DCDCAA", None, None, r"\bdef\s+([A-Za-z_]\w*)\b", group=1)
-        self._make_fmt(self.rules, "#DCDCAA", None, None, r"\bclass\s+([A-Za-z_]\w*)\b", group=1)
-        self._make_fmt(self.rules, "#DCDCAA", None, None, r"@[A-Za-z_]\w*")
+        self._fmt = {
+            "kw": self._fmt_color(C_KEYWORD),
+            "decl": self._fmt_color(C_DECL),
+            "string": self._fmt_color(C_STRING),
+            "comment": self._fmt_color(C_COMMENT),
+            "number": self._fmt_color(C_NUMBER),
+            "func": self._fmt_color(C_FUNC),
+            "builtin": self._fmt_color(C_BUILTIN),
+        }
+        self.block_comment = None
+        self.set_language(language)
 
-        self.triple = QTextCharFormat()
-        self.triple.setForeground(QColor("#CE9178"))
-
-    def _make_fmt(self, rules, color, bold, italic, pattern, group=0):
+    @staticmethod
+    def _fmt_color(color):
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color))
-        if bold:
-            fmt.setFontWeight(QFont.Bold)
-        if italic:
-            fmt.setFontItalic(True)
-        from PyQt5.QtCore import QRegularExpression
-        rules.append((QRegularExpression(pattern), fmt, group))
+        return fmt
+
+    def set_language(self, language):
+        spec = LANG_SPECS.get(language) or {}
+        self.block_comment = spec.get("block_comment")
+        rules = []
+
+        def add(pattern, fmt, group=0):
+            rules.append((QRegularExpression(pattern), fmt, group))
+
+        if spec.get("line_comment"):
+            add(spec["line_comment"], self._fmt["comment"])
+        for s in spec.get("strings", []):
+            add(s, self._fmt["string"])
+        add(r"\b[0-9]+(\.[0-9]+)?\b", self._fmt["number"])
+        if spec.get("kw"):
+            add(r"\b(" + "|".join(re.escape(k) for k in spec["kw"]) + r")\b", self._fmt["kw"])
+        if spec.get("decl"):
+            add(r"\b(" + "|".join(re.escape(k) for k in spec["decl"]) + r")\b", self._fmt["decl"])
+        if spec.get("builtin"):
+            add(r"\b(" + "|".join(re.escape(k) for k in spec["builtin"]) + r")\b", self._fmt["builtin"])
+        for kw in spec.get("func", []):
+            add(r"\b" + re.escape(kw) + r"\s+([A-Za-z_]\w*)\b", self._fmt["func"], 1)
+
+        self.rules = rules
+        self.rehighlight()
 
     def highlightBlock(self, text):
-        from PyQt5.QtCore import QRegularExpression
         for expr, fmt, group in self.rules:
             it = expr.globalMatch(text)
             while it.hasNext():
@@ -102,21 +445,35 @@ class PythonHighlighter(QSyntaxHighlighter):
                 if length > 0:
                     self.setFormat(start, length, fmt)
 
-        start = self.currentBlock().position()
-        end = start + len(text)
-        block = self.currentBlock()
-        if block.previous().isValid() and self.previousBlockState() == 1:
-            self.setFormat(0, len(text), self.triple)
-        triple_count = text.count('"""') + text.count("'''")
-        if triple_count % 2 == 1:
-            idx = max(text.rfind('"""'), text.rfind("'''"))
-            if idx >= 0:
-                self.setFormat(idx, len(text) - idx, self.triple)
-                self.setCurrentBlockState(1)
-            else:
-                self.setCurrentBlockState(1)
+        if self.block_comment:
+            self._apply_block_comment(text)
         else:
             self.setCurrentBlockState(0)
+
+    def _apply_block_comment(self, text):
+        start_marker, end_marker = self.block_comment
+        length = len(text)
+        if self.previousBlockState() == 1:
+            end_idx = text.find(end_marker)
+            if end_idx == -1:
+                self.setFormat(0, length, self._fmt["comment"])
+                self.setCurrentBlockState(1)
+                return
+            self.setFormat(0, end_idx + len(end_marker), self._fmt["comment"])
+            rest = end_idx + len(end_marker)
+        else:
+            rest = 0
+
+        idx = text.find(start_marker, rest)
+        while idx != -1:
+            end_idx = text.find(end_marker, idx + len(start_marker))
+            if end_idx == -1:
+                self.setFormat(idx, length - idx, self._fmt["comment"])
+                self.setCurrentBlockState(1)
+                return
+            self.setFormat(idx, end_idx + len(end_marker) - idx, self._fmt["comment"])
+            idx = text.find(start_marker, end_idx + len(end_marker))
+        self.setCurrentBlockState(0)
 
 
 class CodeEditor(QPlainTextEdit):
@@ -132,7 +489,7 @@ class CodeEditor(QPlainTextEdit):
                 selection-background-color: {EDITOR_SELECTION};
             }}
         """)
-        self.highlighter = PythonHighlighter(self.document())
+        self.highlighter = SyntaxHighlighter(self.document(), "python")
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
 
         self.line_number_area = LineNumberArea(self)
@@ -141,6 +498,9 @@ class CodeEditor(QPlainTextEdit):
         self.cursorPositionChanged.connect(self._highlight_current)
         self._update_width()
         self._highlight_current()
+
+    def set_language(self, language):
+        self.highlighter.set_language(language)
 
     def _update_width(self):
         self.setViewportMargins(self._area_width(), 0, 0, 0)
@@ -243,6 +603,8 @@ class RenderThread(QThread):
                 clear_code_mode=c["clear_code_mode"],
                 clear_code_run_time=c["clear_code_run_time"],
                 end_wait_time=c["end_wait_time"],
+                quality=c.get("quality"),
+                frame_rate=c.get("frame_rate"),
             )
             renderer.render(output=False)
 
@@ -337,11 +699,19 @@ class MainWindow(QMainWindow):
 
         self.status = QTextBrowser()
         self.status.setMaximumHeight(120)
-        self.status.setStyleSheet(f"background-color: {EDITOR_GUTTER}; color: {EDITOR_FG}; border: none;")
+        self.status.setStyleSheet(f"background-color: {EDITOR_CURRENT_LINE}; color: {EDITOR_FG}; border: none;")
 
         self.render_btn = QPushButton("Render Video")
         self.render_btn.setMinimumHeight(36)
         self.render_btn.clicked.connect(self._start_render)
+
+        self.preview_btn = QPushButton("Quick Preview")
+        self.preview_btn.setMinimumHeight(36)
+        self.preview_btn.clicked.connect(self._start_preview)
+
+        self.open_btn = QPushButton("Open Folder")
+        self.open_btn.setMinimumHeight(36)
+        self.open_btn.clicked.connect(self._open_output_folder)
 
         self.result_label = QLabel("")
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -353,11 +723,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
         bottom = QHBoxLayout()
         bottom.addWidget(self.render_btn, 1)
+        bottom.addWidget(self.preview_btn, 1)
+        bottom.addWidget(self.open_btn, 1)
         bottom.addWidget(self.result_label, 3)
         layout.addLayout(bottom)
         self.setCentralWidget(central)
 
         self.thread = None
+        self._last_output = None
 
     def _add_row(self, form, label, widget):
         form.addRow(label, widget)
@@ -373,10 +746,21 @@ class MainWindow(QMainWindow):
 
         self.language = QComboBox()
         self.language.addItems(LANGUAGES)
+        self.language.currentTextChanged.connect(self.editor.set_language)
         form.addRow("Language", self.language)
 
         self.video_name = QLineEdit("code_video")
         form.addRow("Video name", self.video_name)
+
+        self.quality = QComboBox()
+        self.quality.addItems(QUALITIES)
+        self.quality.setCurrentText("medium_quality")
+        form.addRow("Quality", self.quality)
+
+        self.frame_rate = QSpinBox()
+        self.frame_rate.setRange(15, 60)
+        self.frame_rate.setValue(30)
+        form.addRow("Frame rate", self.frame_rate)
 
         self.background_color = QLineEdit("#23272e")
         bg_color_btn = QPushButton("Pick")
@@ -389,7 +773,14 @@ class MainWindow(QMainWindow):
         form.addRow("Background", bg_row)
 
         self.line_highlight_color = QLineEdit("#2c313c")
-        form.addRow("Line highlight", self.line_highlight_color)
+        hl_color_btn = QPushButton("Pick")
+        hl_color_btn.clicked.connect(self._pick_line_highlight_color)
+        hl_row = QWidget()
+        hl_lay = QHBoxLayout(hl_row)
+        hl_lay.setContentsMargins(0, 0, 0, 0)
+        hl_lay.addWidget(self.line_highlight_color)
+        hl_lay.addWidget(hl_color_btn)
+        form.addRow("Line highlight", hl_row)
 
         self.interval_min = QDoubleSpinBox()
         self.interval_min.setRange(0.01, 2.0)
@@ -610,6 +1001,11 @@ class MainWindow(QMainWindow):
         if color.isValid():
             self.background_color.setText(color.name())
 
+    def _pick_line_highlight_color(self):
+        color = QColorDialog.getColor(QColor(self.line_highlight_color.text()), self, "Line highlight color")
+        if color.isValid():
+            self.line_highlight_color.setText(color.name())
+
     def _add_lyric_row(self):
         row = self.lyrics_table.rowCount()
         self.lyrics_table.insertRow(row)
@@ -636,19 +1032,14 @@ class MainWindow(QMainWindow):
                 lyrics.append((start, end, text))
         return lyrics
 
-    def _start_render(self):
-        if self.thread is not None and self.thread.isRunning():
-            return
-        code = self.editor.toPlainText()
-        if not code.strip():
-            QMessageBox.warning(self, "Empty code", "Write some code first.")
-            return
+    def _collect_cfg(self):
         video_name = self.video_name.text().strip() or "code_video"
-
-        cfg = {
-            "code": code,
+        return {
+            "code": self.editor.toPlainText(),
             "language": self.language.currentText(),
             "video_name": video_name,
+            "quality": self.quality.currentText(),
+            "frame_rate": self.frame_rate.value(),
             "background_color": self.background_color.text().strip() or "#23272e",
             "line_highlight_color": self.line_highlight_color.text().strip() or "#2c313c",
             "interval_min": self.interval_min.value(),
@@ -695,7 +1086,30 @@ class MainWindow(QMainWindow):
             "watermark_color": self.watermark_color.text().strip() or "white",
         }
 
+    def _start_render(self):
+        self._start(False)
+
+    def _start_preview(self):
+        self._start(True)
+
+    def _start(self, preview):
+        if self.thread is not None and self.thread.isRunning():
+            return
+        code = self.editor.toPlainText()
+        if not code.strip():
+            QMessageBox.warning(self, "Empty code", "Write some code first.")
+            return
+
+        cfg = self._collect_cfg()
+        if preview:
+            cfg["video_name"] = (cfg["video_name"] or "code_video") + "_preview"
+            cfg["quality"] = "low_quality"
+            cfg["frame_rate"] = 15
+            cfg["end_wait_time"] = 0.2
+            cfg["clear_code"] = False
+
         self.render_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
         self.status.clear()
         self.result_label.setText("")
         self.thread = RenderThread(cfg)
@@ -706,11 +1120,18 @@ class MainWindow(QMainWindow):
 
     def _on_done(self, path):
         self.render_btn.setEnabled(True)
+        self.preview_btn.setEnabled(True)
+        self._last_output = path
         self.result_label.setText(f"Ready: {path}")
 
     def _on_failed(self, err):
         self.render_btn.setEnabled(True)
+        self.preview_btn.setEnabled(True)
         self.status.append("ERROR:\n" + err)
+
+    def _open_output_folder(self):
+        folder = Path(self._last_output).parent if self._last_output else Path.cwd() / "media" / "videos"
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 def main():
@@ -720,8 +1141,8 @@ def main():
         QWidget {{ background-color: {EDITOR_BG}; color: {EDITOR_FG}; font-size: 13px; }}
         QLabel {{ background: transparent; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTableWidget {{
-            background-color: {EDITOR_GUTTER}; color: {EDITOR_FG};
-            border: 1px solid #3c3c3c; border-radius: 3px; padding: 3px;
+            background-color: {EDITOR_CURRENT_LINE}; color: {EDITOR_FG};
+            border: 1px solid #3d4556; border-radius: 3px; padding: 3px;
         }}
         QPushButton {{
             background-color: #0e639c; color: white; border: none;
@@ -731,7 +1152,7 @@ def main():
         QPushButton:disabled {{ background-color: #3c3c3c; color: #808080; }}
         QCheckBox {{ background: transparent; }}
         QScrollArea {{ border: none; }}
-        QHeaderView::section {{ background-color: {EDITOR_GUTTER}; color: {EDITOR_FG}; border: 1px solid #3c3c3c; }}
+        QHeaderView::section {{ background-color: {EDITOR_CURRENT_LINE}; color: {EDITOR_FG}; border: 1px solid #3d4556; }}
     """)
     win = MainWindow()
     win.show()
