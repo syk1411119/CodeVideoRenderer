@@ -1,18 +1,12 @@
-from __future__ import annotations # for Sphinx typehints
-from manim import VGroup, Code, SurroundingRectangle, RoundedRectangle, Rectangle, Line, MovingCameraScene, rate_functions, RendererType, config, WHITE, GREY, UP, DOWN, LEFT, RIGHT, register_font, FadeOut, FadeIn, Text
-from manim.typing import Point3D
+from manim import VGroup, Group, Code, SurroundingRectangle, RoundedRectangle, Rectangle, Line, MovingCameraScene, rate_functions, RendererType, config, WHITE, GREY, UP, DOWN, LEFT, RIGHT, register_font, FadeOut, FadeIn, Text, ImageMobject
 from pathlib import Path
 from copy import copy
-from typing import Literal, Union, Tuple, List, Dict
 from timeit import timeit
 from rich import traceback
-from dataclasses import dataclass
-from typeguard import typechecked
 import numpy as np
-import random, inspect, os
+import random, inspect, os, re
 
 from .config import *
-from .typing import *
 from .utils import *
 from .vscode_theme import register_vscode, resolve_language, STYLE_NAME
 from .ime import is_cjk, get_ime
@@ -20,143 +14,81 @@ from .ime import is_cjk, get_ime
 traceback.install()
 register_vscode()
 
-# VS Code-style code completion: trigger keyword -> candidate suggestions (label, kind, detail)
-AUTOCOMPLETE_SUGGESTIONS: Dict[str, List[Tuple[str, str, str]]] = {
-    "def": [
-        ("def", "keyword", "keyword"),
-        ("def name():", "snippet", "function"),
-        ("def name(args):", "snippet", "function"),
-        ("def __init__(self):", "method", "method"),
-    ],
-    "class": [
-        ("class", "keyword", "keyword"),
-        ("class Name:", "snippet", "class"),
-        ("class Name(Base):", "snippet", "class"),
-        ("class Meta:", "snippet", "class"),
-    ],
-    "import": [
-        ("import os", "module", "module"),
-        ("import sys", "module", "module"),
-        ("import numpy as np", "module", "module"),
-        ("import re", "module", "module"),
-    ],
-    "from": [
-        ("from module import name", "snippet", "import"),
-        ("from . import name", "module", "import"),
-        ("from typing import List", "module", "module"),
-    ],
-    "for": [
-        ("for i in range(n):", "snippet", "loop"),
-        ("for item in iterable:", "snippet", "loop"),
-        ("for k, v in d.items():", "snippet", "loop"),
-    ],
-    "if": [
-        ("if condition:", "snippet", "conditional"),
-        ("if x is None:", "snippet", "conditional"),
-        ("if __name__ == '__main__':", "snippet", "main"),
-    ],
-    "return": [
-        ("return", "keyword", "keyword"),
-        ("return value", "snippet", "statement"),
-        ("return None", "snippet", "statement"),
-        ("return self", "snippet", "statement"),
-    ],
-    "print": [
-        ("print", "function", "built-in"),
-        ("print(*args)", "function", "built-in"),
-        ("print(f'...')", "function", "built-in"),
-    ],
-    "while": [
-        ("while condition:", "snippet", "loop"),
-        ("while True:", "snippet", "loop"),
-    ],
-    "try": [
-        ("try:", "snippet", "exception"),
-        ("try: ... except Exception as e:", "snippet", "exception"),
-    ],
-    "with": [
-        ("with open(...) as f:", "snippet", "context manager"),
-        ("with contextlib.suppress(...):", "snippet", "context manager"),
-    ],
+# griddycode completion icons (Icons/function.png, Icons/variable.png preloaded in settings.gd)
+AUTOCOMPLETE_ICONS = {
+    "function": os.path.join(os.path.dirname(__file__), "icons", "function.png"),
+    "variable": os.path.join(os.path.dirname(__file__), "icons", "variable.png"),
 }
 
-# VS Code completion icons: kind -> (glyph, color). Glyphs/colors mirror VS Code's Codicon + symbolIcon colors
-AUTOCOMPLETE_KIND_STYLE: Dict[str, Tuple[str, str]] = {
-    "keyword": ("⚿", "#569CD6"),     # blue key icon
-    "function": ("ƒ", "#B180D7"),     # purple ƒ
-    "method": ("ƒ", "#B180D7"),       # purple ƒ
-    "class": ("▣", "#EE9D28"),        # orange square
-    "module": ("▣", "#75BEFF"),       # blue square
-    "snippet": ("➤", "#75BEFF"),      # blue arrow
-    "variable": ("●", "#75BEFF"),     # blue dot
-    "string": ("§", "#CE9178"),       # orange §
-    "number": ("≡", "#B5CEA8"),       # green ≡
-    "constant": ("≡", "#B5CEA8"),
-    "property": ("●", "#75BEFF"),
+# griddycode completion option colors: LuaSingleton.keywords.function / .variable (settings.gd)
+AUTOCOMPLETE_COLORS = {
+    "function": "#61afef",
+    "variable": "#d19a66",
 }
 
-# Completion box colors from VS Code's dark theme (consistent with Dark+)
-_SUGGEST_BG = "#252526"
-_SUGGEST_BORDER = "#454545"
-_SUGGEST_FG = "#D4D4D4"
-_SUGGEST_DETAIL = "#808080"
-_SUGGEST_SELECTED_BG = "#04395E"
+# completion box colors, matching griddycode "One Dark Pro Darker" gui colors
+_SUGGEST_BG = "#1e2227"
+_SUGGEST_BORDER = "#3d4556"
+_SUGGEST_FG = "#abb2bf"
+_SUGGEST_DETAIL = "#7f848e"
+_SUGGEST_SELECTED_BG = "#2c313a"
+
+
+def detect_functions(code_str):
+    """Port of griddycode `Lua/Plugins/py.lua` `detect_functions`: def / async def names."""
+    names = []
+    for line in code_str.splitlines():
+        m = re.search(r"def\s+([\w_]+)\s*\(", line)
+        if m:
+            names.append(m.group(1))
+        m = re.search(r"async\s+def\s+([\w_]+)\s*\(", line)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def detect_variables(code_str):
+    """Port of griddycode `Lua/Plugins/py.lua` `detect_variables`: builtins + `name = ...` assignments."""
+    names = ["self", "__name__", "__annotations__", "__build_class__", "__builtins__",
+             "__cached__", "__dict__", "__doc__", "__file__", "__import__", "__loader__",
+             "__name__", "__package__", "__path__", "__spec__"]
+    for line in code_str.splitlines():
+        m = re.search(r"(\w+)\s*=\s*.+", line)
+        if m:
+            names.append(m.group(1))
+    return names
+
 
 class CameraFollowCursorCV:
-    """
-    CameraFollowCursorCV is a class designed to create animated videos that simulate the process of typing code. It animates code line by line and character by
-    character while smoothly moving the camera to follow the cursor, creating a professional-looking coding demonstration.
-
-    Args:
-        code (Union[Tuple[Literal['string'], str], Tuple[Literal['file'], StrPath]]): The code to be animated. **When using a string**, provide a tuple with the first element as ``'string'`` and the second element as the code string. **When using a file**, provide a tuple with the first element as ``'file'`` and the second element as the file path.
-        language (PygmentsLanguage): The programming language of the code.
-        formatter_style (PygmentsFormatterStyle): The style for syntax highlighting. Defaults to ``"vscode-dark-plus"`` (VS Code Dark+ colors).
-        line_spacing (Union[float, int]): The line spacing for the code. Defaults to :data:`~.DEFAULT_LINE_SPACING`.
-        interval_range (Tuple[Union[float, int], Union[float, int]]): The range of typing intervals between characters. Defaults to (:data:`~.DEFAULT_TYPE_INTERVAL`, :data:`~.DEFAULT_TYPE_INTERVAL`).
-        camera_scale (Union[float, int]): The scale factor for the camera. Defaults to 0.5.
-        video_name (str): The name of the output video file. Defaults to ``"CameraFollowCursorCV"``.
-        renderer (Literal['cairo', 'opengl']): The renderer to use for video rendering. Defaults to ``'cairo'``.
-        clear_code (bool): Whether to clear the code off screen after the typing animation finishes. Defaults to ``False``.
-        clear_code_mode (Literal['fade', 'backspace']): How to clear the code. ``'backspace'`` deletes character by character (like pressing backspace); ``'fade'`` fades the whole block out at once. Defaults to ``'backspace'``.
-        clear_code_run_time (float): Duration (seconds) of the whole-block fade (``clear_code_mode='fade'``) or the final fade of line numbers/cursor (backspace mode). Defaults to 1.0.
-        clear_code_interval (float): Time between deleting each character in backspace mode — controls the deletion speed. Defaults to 0.03.
-        autocomplete (bool): Whether to show VS Code-style completion popups when a keyword (``def``, ``import``, ``class``, …) is typed. Defaults to ``False``.
-        autocomplete_wait_time (float): How long each completion popup stays on screen (seconds). Defaults to 0.6.
-        chinese_ime (bool): Whether to show a Chinese IME-style candidate box (pinyin + candidates) when Chinese characters are typed. Defaults to ``False``.
-        ime_wait_time (float): How long each IME candidate box stays on screen (seconds). Defaults to 0.6.
-        background_color (str): The scene background color. Defaults to ``"#000000"``.
-        line_highlight_color (str): Fill color of the rectangle highlighting the line being typed. Defaults to ``"#333333"``.
-        end_wait_time (float): How long to pause on the final frame after typing (seconds). Defaults to 1.0.
-    """
+    """Animate code being typed while the camera follows the cursor."""
     __all__ = ["render"]
 
-    @typechecked
     def __init__(self,
-        code: Union[Tuple[Literal['string'], str], Tuple[Literal['file'], StrPath]],
-        language: PygmentsLanguage,
-        formatter_style: PygmentsFormatterStyle = "vscode-dark-plus",
-        line_spacing: Union[float, int] = DEFAULT_LINE_SPACING,
-        interval_range: Tuple[Union[float, int], Union[float, int]] = (DEFAULT_TYPE_INTERVAL, DEFAULT_TYPE_INTERVAL),
-        camera_scale: Union[float, int] = 0.5,
-        video_name: str = "CameraFollowCursorCV",
-        renderer: Literal['cairo', 'opengl'] = 'cairo',
-        clear_code: bool = False,
-        clear_code_mode: Literal['fade', 'backspace'] = 'backspace',
-        clear_code_run_time: float = 1.0,
-        clear_code_interval: float = 0.03,
-        autocomplete: bool = False,
-        autocomplete_wait_time: float = 0.6,
-        chinese_ime: bool = False,
-        ime_wait_time: float = 0.6,
-        background_color: str = "#000000",
-        line_highlight_color: str = "#333333",
-        end_wait_time: float = 1.0,
+        code,
+        language,
+        formatter_style="vscode-dark-plus",
+        line_spacing=DEFAULT_LINE_SPACING,
+        interval_range=(DEFAULT_TYPE_INTERVAL, DEFAULT_TYPE_INTERVAL),
+        camera_scale=0.5,
+        video_name="CameraFollowCursorCV",
+        renderer='cairo',
+        clear_code=False,
+        clear_code_mode='backspace',
+        clear_code_run_time=1.0,
+        clear_code_interval=0.03,
+        autocomplete=False,
+        autocomplete_wait_time=0.6,
+        chinese_ime=False,
+        ime_wait_time=0.6,
+        background_color="#23272e",
+        line_highlight_color="#2c313c",
+        end_wait_time=1.0,
+        quality=None,
+        frame_rate=None,
     ):
-        # ----- Video name -----
         if not video_name:
             raise ValueError("video_name must be provided")
 
-        # ----- Code input -----
         if code[0] == 'string':
             self.code_str = code[1].expandtabs(tabsize=DEFAULT_TAB_WIDTH)
             if not all(char not in NOT_AVAILABLE_CHARACTERS for char in self.code_str):
@@ -169,45 +101,22 @@ class CameraFollowCursorCV:
             except UnicodeDecodeError:
                 raise ValueError(f"Failed to decode '{code[1]}' with UTF-8 encoding") from None
 
-        # ----- Line spacing -----
         if line_spacing <= 0:
             raise ValueError("line_spacing must be greater than 0")
 
-        # ----- Typing interval -----
-        shortest_possible_duration = round(1/config.frame_rate, 7)
-        if not all(interval >= shortest_possible_duration for interval in interval_range):
-            raise ValueError(f"interval_range must be greater than or equal to {shortest_possible_duration}")
-        del shortest_possible_duration
+        min_interval = round(1/config.frame_rate, 7)
+        if not all(interval >= min_interval for interval in interval_range):
+            raise ValueError(f"interval_range must be greater than or equal to {min_interval}")
+        del min_interval
         if interval_range[0] > interval_range[1]:
             raise ValueError("The first term of interval_range must be less than or equal to the second term")
 
-        # ----- Deletion speed -----
         if clear_code_interval <= 0:
             raise ValueError("clear_code_interval must be greater than 0")
 
-        # Parameters
         global Parameters
-        @dataclass
         class Parameters:
-            code: Union[Tuple[Literal['string'], str], Tuple[Literal['file'], StrPath]]
-            language: PygmentsLanguage
-            formatter_style: PygmentsFormatterStyle
-            line_spacing: Union[float, int]
-            interval_range: Tuple[Union[float, int], Union[float, int]]
-            camera_scale: Union[float, int]
-            video_name: str
-            renderer: Literal['cairo', 'opengl']
-            clear_code: bool
-            clear_code_mode: Literal['fade', 'backspace']
-            clear_code_run_time: float
-            clear_code_interval: float
-            autocomplete: bool
-            autocomplete_wait_time: float
-            chinese_ime: bool
-            ime_wait_time: float
-            background_color: str
-            line_highlight_color: str
-            end_wait_time: float
+            pass
         Parameters.code = code
         Parameters.language = language
         Parameters.formatter_style = formatter_style
@@ -228,30 +137,43 @@ class CameraFollowCursorCV:
         Parameters.line_highlight_color = line_highlight_color
         Parameters.end_wait_time = end_wait_time
 
-        # Other
         self.code_str = stripEmptyLines(self.code_str)
         self.space_positions = findSpacePositions(self.code_str)
         self.empty_line_positions = findEmptyLinePositions(self.code_str)
+        # griddycode settings.gd: completion options = detected functions + detected variables
+        self.detected_symbols = []
+        _seen = set()
+        for _f in detect_functions(self.code_str):
+            if ("function", _f) not in _seen:
+                _seen.add(("function", _f))
+                self.detected_symbols.append((_f, "function"))
+        for _v in detect_variables(self.code_str):
+            if ("variable", _v) not in _seen:
+                _seen.add(("variable", _v))
+                self.detected_symbols.append((_v, "variable"))
         self.code_str = replaceMiddleSpacesWithOccupyCharacter("\n".join([" " if line == "" else line for line in self.code_str.splitlines()]))
         self.code_str_lines = self.code_str.splitlines()
         self.origin_config = {
             'disable_caching': config.disable_caching,
             'renderer': config.renderer,
-            'background_color': config.background_color
+            'background_color': config.background_color,
+            'quality': config.quality,
+            'frame_rate': config.frame_rate,
         }
         config.disable_caching = True
         config.renderer = renderer
         config.background_color = background_color
+        if quality is not None:
+            config.quality = quality
+        if frame_rate is not None:
+            config.frame_rate = frame_rate
         self.scene = self._create_scene()
 
     def _create_scene(self):
-        """Create manim scene to animate code rendering."""
         class CameraFollowCursorCVScene(MovingCameraScene):
 
             def construct(scene):
-                """Build the code animation scene."""
 
-                # Initialize the cursor
                 cursor = RoundedRectangle(
                     height=DEFAULT_CURSOR_HEIGHT,
                     width=DEFAULT_CURSOR_WIDTH,
@@ -261,7 +183,6 @@ class CameraFollowCursorCV:
                     color=WHITE
                 )
 
-                # Create the code block
                 with register_font(os.path.join(os.path.dirname(__file__), 'fonts/CodeVideoRendererFont.ttf')):
                     line_number_mobject, code_mobject = Code(
                         code_string=self.code_str + f"\n{(max([len(line.rstrip()) for line in self.code_str_lines])*2)*' ' + OCCUPY_CHARACTER}",
@@ -274,8 +195,8 @@ class CameraFollowCursorCV:
                     ).submobjects[1:3]
                 line_number_mobject.set_color(GREY)
 
-                total_line_numbers = len(self.code_str_lines)
-                total_char_numbers = len(''.join(line.strip() for line in self.code_str_lines))
+                total_lines = len(self.code_str_lines)
+                total_chars = len(''.join(line.strip() for line in self.code_str_lines))
 
                 # Adjust code alignment (manim built-in bug)
                 offset_lines = []
@@ -286,9 +207,8 @@ class CameraFollowCursorCV:
                         offset_lines.append(line_index)
                 del line_index, line
 
-                # Create the code-line rectangle
                 code_line_rectangle = SurroundingRectangle(
-                    VGroup(code_mobject[-1], line_number_mobject[-1]), # type: ignore
+                    VGroup(code_mobject[-1], line_number_mobject[-1]),
                     color=Parameters.line_highlight_color,
                     fill_opacity=1,
                     stroke_width=0
@@ -297,104 +217,107 @@ class CameraFollowCursorCV:
                 if 0 in offset_lines:
                     code_line_rectangle.shift(UP*CODE_OFFSET/2)
 
-                # Initialize the cursor position
                 cursor.align_to(code_mobject[0], LEFT).set_y(code_line_rectangle.get_y())
 
-                # Adapt for opengl
                 if config.renderer == RendererType.OPENGL:
-                    scene.camera.frame = scene.camera # type: ignore
+                    scene.camera.frame = scene.camera
 
-                # Entrance animation
                 target_center = cursor.get_center()
                 start_center = target_center + UP * 3
-                scene.camera.frame.scale(Parameters.camera_scale).move_to(start_center) # type: ignore
+                scene.camera.frame.scale(Parameters.camera_scale).move_to(start_center)
                 scene.add(code_line_rectangle, line_number_mobject[0].set_color(WHITE), cursor)
 
                 scene.play(
-                    scene.camera.frame.animate.move_to(target_center), # type: ignore[reportArgumentType, reportAttributeAccessIssue]
+                    scene.camera.frame.animate.move_to(target_center),
                     run_time=1,
                     rate_func=rate_functions.ease_out_cubic
                 )
 
-                # Define fixed animations
-                scene.Animation_list: List[Dict[str, Union[Point3D, float]]] = []
+                scene.Animation_list = []
                 def linebreakAnimation():
-                    scene.Animation_list.append({"move_to": cursor.get_center()})
+                    scene.Animation_list.append({"move_to": cursor.get_center() + drift_offset()})
 
                 camera_scale = Parameters.camera_scale
+                longest_line = 0
+
+                # griddycode camera.gd idle sway: offset = (sin(d*speed)*radius, cos(d*speed)*radius)
+                drift_time = [0.0]
+                def drift_offset():
+                    radius = scene.camera.frame.height * 0.1
+                    t = drift_time[0]
+                    return np.array([np.sin(t * 2.0) * radius, np.cos(t * 2.0) * radius, 0.0])
+
                 def JUDGE_cameraScaleAnimation():
                     nonlocal camera_scale
-                    distance = (scene.camera.frame.get_x() - line_number_mobject.get_x()) / 14.22 # type: ignore
-                    if distance > camera_scale:
-                        scene.Animation_list.append({"scale": distance/camera_scale})
-                        camera_scale = distance
+                    # griddycode camera.gd: zoom = clamp(10 - (chars + 1) / SCALE, 1, 10), SCALE = 7
+                    godot_zoom = max(1.0, min(10.0, 10.0 - (longest_line + 1) / 7.0))
+                    target_scale = Parameters.camera_scale * 10.0 / godot_zoom
+                    if target_scale != camera_scale:
+                        scene.Animation_list.append({"scale": target_scale / camera_scale})
+                        camera_scale = target_scale
 
                 def playAnimation(**kwargs):
                     if scene.Animation_list:
-                        cameraAnimation = scene.camera.frame.animate # type: ignore
+                        camera_anim = scene.camera.frame.animate
 
                         for anim in scene.Animation_list:
                             if "move_to" in anim:
-                                cameraAnimation.move_to(anim["move_to"])
+                                camera_anim.move_to(anim["move_to"])
                             elif "scale" in anim:
-                                cameraAnimation.scale(anim["scale"])
+                                camera_anim.scale(anim["scale"])
 
-                        scene.play(cameraAnimation, **kwargs)
+                        scene.play(camera_anim, **kwargs)
+                        drift_time[0] += kwargs.get("run_time", 0.0)
                         scene.Animation_list.clear()
-                        del cameraAnimation
+                        del camera_anim
 
-                # Record all typed characters for backspace deletion
-                typed_mobjects: List = []
+                typed_mobjects = []
 
                 font_path = os.path.join(os.path.dirname(__file__), 'fonts/CodeVideoRendererFont.ttf')
 
-                def showAutocomplete(keyword: str):
-                    """Show a VS Code-style IntelliSense completion box: icon + label + detail + selection highlight."""
-                    suggestions = AUTOCOMPLETE_SUGGESTIONS.get(keyword, [])[:5]
-                    if not suggestions:
+                # griddycode settings.gd: completion options = detected functions + detected variables
+                completion_symbols = self.detected_symbols
+
+                def showAutocomplete(keyword):
+                    matches = [(n, k) for n, k in completion_symbols if n == keyword]
+                    if not matches:
                         return
                     with register_font(font_path):
                         rows = []
-                        for label, kind, detail in suggestions:
-                            glyph, color = AUTOCOMPLETE_KIND_STYLE.get(kind, ("▣", "#75BEFF"))
-                            icon = Text(glyph, font="CodeVideoRendererFont", font_size=16, color=color)
-                            label_t = Text(label, font="CodeVideoRendererFont", font_size=20, color=_SUGGEST_FG)
-                            detail_t = Text(detail, font="CodeVideoRendererFont", font_size=16, color=_SUGGEST_DETAIL)
-                            rows.append((icon, label_t, detail_t))
+                        for name, kind in matches:
+                            icon = ImageMobject(AUTOCOMPLETE_ICONS[kind]).scale_to_fit_height(0.3)
+                            display = name + "()" if kind == "function" else name
+                            label_t = Text(display, font="CodeVideoRendererFont", font_size=20, color=AUTOCOMPLETE_COLORS[kind])
+                            icon.next_to(label_t, LEFT, buff=0.14)
+                            rows.append(Group(icon, label_t))
 
-                    # Compact, row-aligned layout: icon + label on the left, detail right-aligned.
-                    pad_x, pad_y = 0.22, 0.15
-                    icon_gap, detail_gap, row_buff = 0.12, 0.5, 0.12
-                    lefts = [VGroup(ic, lb).arrange(RIGHT, aligned_edge=DOWN, buff=icon_gap) for ic, lb, _ in rows]
-                    details = [dt for _, _, dt in rows]
-
-                    max_left_w = max(l.width for l in lefts)
-                    max_detail_w = max(d.width for d in details)
-                    row_h = max(l.height for l in lefts)
+                    # griddycode completion box: icon + colored name per row, no detail column.
+                    pad_x, pad_y = 0.25, 0.15
+                    row_buff = 0.1
+                    max_row_w = max(r.width for r in rows)
+                    row_h = max(r.height for r in rows)
                     row_step = row_h + row_buff
 
                     box = RoundedRectangle(
-                        width=max_left_w + detail_gap + max_detail_w + 2 * pad_x,
-                        height=row_h * len(rows) + row_buff * (len(rows) - 1) + 2 * pad_y,
+                        width=max_row_w + 2 * pad_x,
+                        height=row_step * len(rows) + 2 * pad_y,
                         corner_radius=0.06,
-                        color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG, fill_opacity=1, stroke_width=1,
+                        color=_SUGGEST_BG, fill_color=_SUGGEST_BG, fill_opacity=1, stroke_width=0,
                     )
 
                     content_left = box.get_left()[0] + pad_x
-                    content_right = box.get_right()[0] - pad_x
                     top_y = box.get_top()[1] - pad_y
-                    for i, (left, detail_t) in enumerate(zip(lefts, details)):
+                    for i, row in enumerate(rows):
                         row_y = top_y - row_step * i - row_h / 2
-                        left.move_to([content_left + left.width / 2, row_y, 0])
-                        detail_t.move_to([content_right - detail_t.width / 2, row_y, 0])
+                        row.move_to([content_left + row.width / 2, row_y, 0])
 
-                    # Highlight the whole row of the first (selected) item
+                    # first row is selected (completion_selected_color)
                     sel = Rectangle(
                         width=box.width - 0.1, height=row_step,
                         color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
-                    ).move_to([box.get_x(), lefts[0].get_y(), 0])
+                    ).move_to([box.get_x(), rows[0].get_y(), 0])
 
-                    popup = VGroup(box, sel, *lefts, *details)
+                    popup = Group(box, sel, *rows)
                     popup.next_to(cursor, DOWN, buff=0.3)
 
                     scene.add(popup)
@@ -402,8 +325,7 @@ class CameraFollowCursorCV:
                     scene.wait(Parameters.autocomplete_wait_time)
                     scene.play(FadeOut(popup), run_time=0.12)
 
-                def showIme(pinyin: str, candidates):
-                    """Show a Chinese IME candidate box: pinyin (hyphen-separated) + divider + candidates."""
+                def showIme(pinyin, candidates):
                     if not candidates:
                         return
                     with register_font(font_path):
@@ -416,7 +338,7 @@ class CameraFollowCursorCV:
                     bar = Rectangle(width=inner_w, height=0.03, fill_color=_SUGGEST_BORDER, fill_opacity=1, stroke_width=0)
                     content = VGroup(py_t, bar, cand_row).arrange(DOWN, aligned_edge=LEFT, buff=0.12)
 
-                    first_hl = Rectangle(
+                    hl = Rectangle(
                         width=cands[0].width + 0.18, height=cands[0].height + 0.12,
                         color=_SUGGEST_SELECTED_BG, fill_opacity=1, stroke_width=0,
                     ).move_to(cands[0])
@@ -426,7 +348,7 @@ class CameraFollowCursorCV:
                         corner_radius=0.06,
                         color=_SUGGEST_BORDER, fill_color=_SUGGEST_BG, fill_opacity=1, stroke_width=1,
                     )
-                    popup = VGroup(box, first_hl, py_t, bar, cand_row)
+                    popup = VGroup(box, hl, py_t, bar, cand_row)
                     popup.next_to(cursor, DOWN, buff=0.3)
 
                     scene.add(popup)
@@ -435,10 +357,9 @@ class CameraFollowCursorCV:
                     scene.play(FadeOut(popup), run_time=0.12)
 
                 with copy(DefaultProgressBar(self.output)) as progress:
-                    total_progress = progress.add_task(description="[yellow]Total[/yellow]", total=total_char_numbers)
+                    total_progress = progress.add_task(description="[yellow]Total[/yellow]", total=total_chars)
 
-                    # Iterate over the code lines
-                    for line in range(total_line_numbers):
+                    for line in range(total_lines):
 
                         line_number_mobject.set_color(GREY)
                         line_number_mobject[line].set_color(WHITE)
@@ -458,87 +379,62 @@ class CameraFollowCursorCV:
                         JUDGE_cameraScaleAnimation()
                         playAnimation(run_time=DEFAULT_LINE_BREAK_RUN_TIME)
 
-                        # Skip empty lines
                         if line in self.empty_line_positions:
                             progress.remove_task(current_line_progress)
                             continue
 
-                        first_non_space_index = len(self.code_str_lines[line]) - len(self.code_str_lines[line].lstrip())
-                        total_typing_chars = char_num # Number of characters actually typed on this line
+                        indent = len(self.code_str_lines[line]) - len(self.code_str_lines[line].lstrip())
 
-                        # Compute the autocomplete trigger point for this line (the moment the keyword is fully typed)
-                        trigger_column = None
-                        trigger_keyword = None
-                        if Parameters.autocomplete:
-                            stripped = self.code_str_lines[line].lstrip()
-                            for kw in AUTOCOMPLETE_SUGGESTIONS:
-                                if stripped.startswith(kw):
-                                    rest = stripped[len(kw):]
-                                    if rest == "" or not (rest[0].isalnum() or rest[0] == "_"):
-                                        trigger_keyword = kw
-                                        trigger_column = first_non_space_index + len(kw) - 1
-                                        break
-
-                        # Iterate over each character of the current line
-                        submobjects_char_index = 0
-                        for column in range(first_non_space_index, char_num + first_non_space_index):
+                        # Compute the autocomplete trigger point for this line (the moment the symbol is fully typed)
+                        char_idx = 0
+                        for column in range(indent, char_num + indent):
                             # Handle the disappearing-space issue introduced in manim==0.19.1
                             if not self.code_str_lines[line][column].isspace():
                                 if [line, column] not in self.space_positions:
-                                    scene.add(code_mobject[line][submobjects_char_index])
-                                    typed_mobjects.append(code_mobject[line][submobjects_char_index])
-                                submobjects_char_index += 1
+                                    scene.add(code_mobject[line][char_idx])
+                                    typed_mobjects.append(code_mobject[line][char_idx])
+                                char_idx += 1
                             cursor.next_to(
-                                code_mobject[line][submobjects_char_index-1],
+                                code_mobject[line][char_idx-1],
                                 RIGHT,
                                 buff=DEFAULT_CURSOR_TO_CHAR_BUFFER
                             ).set_y(code_line_rectangle.get_y())
 
-                            # Camera sway logic
+                            # griddycode tracks the longest line as it is typed so the
+                            # camera zoom reacts in real time (camera.gd get_longest_line)
+                            longest_line = max(longest_line, column + 1)
+
                             line_break = False
-                            if column == first_non_space_index and first_non_space_index != 0:
+                            if column == indent and indent != 0:
                                 # If this is the first character after indentation, perform the line-break reset first
                                 linebreakAnimation()
                                 line_break = True
                             else:
-                                # Compute the progress within the current line (0.0 -> 1.0)
-                                current_idx = column - first_non_space_index
-                                max_idx = total_typing_chars - 1
+                                scene.Animation_list.append({"move_to": cursor.get_center() + drift_offset()})
 
-                                if max_idx > 0:
-                                    alpha = current_idx / max_idx
-                                else:
-                                    alpha = 1.0
-
-                                # Envelope sin(alpha * pi), ensuring it is 0 at both ends
-                                envelope = np.sin(alpha * np.pi)
-
-                                # Oscillation term: sin(alpha * omega)
-                                wave_count = total_typing_chars / 15
-                                omega = wave_count * 2 * np.pi
-                                oscillation = np.sin(alpha * omega)
-
-                                # Amplitude is 2.5% of the camera frame height
-                                amplitude = scene.camera.frame.height * 0.025 # type: ignore
-                                offset_y = amplitude * envelope * oscillation
-
-                                target_pos = cursor.get_center() + UP * offset_y
-                                scene.Animation_list.append({"move_to": target_pos})
-
-                            # Scale detection & playback
                             JUDGE_cameraScaleAnimation()
                             playAnimation(
                                 run_time=DEFAULT_LINE_BREAK_RUN_TIME if line_break else random.uniform(*Parameters.interval_range),
                                 rate_func=rate_functions.smooth if line_break else rate_functions.linear
                             )
 
-                            # Report progress
                             progress.advance(total_progress, advance=1)
                             progress.advance(current_line_progress, advance=1)
 
-                            # Keyword fully typed: show the completion popup
-                            if trigger_column is not None and column == trigger_column:
-                                showAutocomplete(trigger_keyword)
+                            # griddycode settings.gd: completion shows once a detected symbol name is fully typed
+                            if Parameters.autocomplete:
+                                end = column + 1
+                                start = column
+                                while start >= 0 and (self.code_str_lines[line][start].isalnum() or self.code_str_lines[line][start] == "_"):
+                                    start -= 1
+                                start += 1
+                                word = self.code_str_lines[line][start:end]
+                                nxt = self.code_str_lines[line][end] if end < len(self.code_str_lines[line]) else ""
+                                if word and (nxt == "" or not (nxt.isalnum() or nxt == "_")):
+                                    for name, _kind in completion_symbols:
+                                        if word == name:
+                                            showAutocomplete(name)
+                                            break
 
                             # Chinese character typed: show the IME candidate box (triggered on the first char of each CJK run)
                             if Parameters.chinese_ime:
@@ -553,7 +449,6 @@ class CameraFollowCursorCV:
                         progress.remove_task(current_line_progress)
                     progress.remove_task(total_progress)
 
-                # Deletion animation after typing completes
                 if Parameters.clear_code:
                     # Pull the camera back to the full code view and hold it still before
                     # deleting; otherwise the camera stays at the last character during
@@ -579,14 +474,12 @@ class CameraFollowCursorCV:
                                 run_time=Parameters.clear_code_interval,
                                 rate_func=rate_functions.linear
                             )
-                        # Finally remove line numbers, cursor, and the line-highlight rectangle
                         scene.play(
                             FadeOut(VGroup(line_number_mobject, cursor, code_line_rectangle)),
                             run_time=Parameters.clear_code_run_time,
                             rate_func=rate_functions.ease_in_out_cubic
                         )
                     else:
-                        # Fade the whole block out
                         scene.play(
                             FadeOut(VGroup(code_mobject, line_number_mobject, cursor, code_line_rectangle)),
                             run_time=Parameters.clear_code_run_time,
@@ -596,7 +489,6 @@ class CameraFollowCursorCV:
                 scene.wait(Parameters.end_wait_time)
 
             def render(scene):
-                """Override render to add timing log."""
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log(f"Start rendering {Parameters.video_name}.mp4.")
                     DEFAULT_OUTPUT_CONSOLE.log("Start rendering CameraFollowCursorCVScene. [dim](by manim)[/]")
@@ -606,24 +498,23 @@ class CameraFollowCursorCV:
                         DEFAULT_OUTPUT_CONSOLE.log('[blue]Currently using GPU (OpenGL Renderer) for rendering.[/]')
                     DEFAULT_OUTPUT_CONSOLE.log("Manim's config has been modified.")
 
-                # Render and measure time
                 with noManimOutput():
                     total_render_time = timeit(super().render, number=1)
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log(f"Successfully rendered CameraFollowCursorCVScene in {total_render_time:,.2f} seconds. [dim](by manim)[/]")
                 del total_render_time
 
-                # Restore config
                 config.disable_caching = self.origin_config['disable_caching']
                 config.renderer = self.origin_config['renderer']
                 config.background_color = self.origin_config['background_color']
+                config.quality = self.origin_config['quality']
+                config.frame_rate = self.origin_config['frame_rate']
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log("Manim's config has been restored.")
                 del self.origin_config
                 if self.output:
                     DEFAULT_OUTPUT_CONSOLE.log(f"Start adding glow effect to CameraFollowCursorCVScene.mp4. [dim](by moviepy)[/]\n")
 
-                # Add the glow effect
                 input_path = Path(scene.renderer.file_writer.movie_file_path)
                 output_path = str(input_path.with_name(f"{Parameters.video_name}.mp4"))
                 total_effect_time = timeit(lambda: addGlowEffect(input_path=input_path, output_path=output_path, output=self.output), number=1)
@@ -634,36 +525,7 @@ class CameraFollowCursorCV:
 
         return CameraFollowCursorCVScene()
 
-    @typechecked
-    def render(self, output: bool = DEFAULT_OUTPUT_VALUE):
-        """
-        Render the animated code video.
-
-        This method triggers the full rendering pipeline:
-
-        1. **Manim rendering** – the code typing animation is rendered using the configured backend (Cairo or OpenGL).
-        2. **Glow effect** – a soft glow post-processing effect is applied to the raw video via MoviePy.
-
-        The final video file is saved next to Manim's default output path with the name specified by ``video_name``.
-
-        Args:
-            output (bool): Whether to print progress messages and timing logs to the console during rendering. Defaults to :data:`~.DEFAULT_OUTPUT_VALUE`.
-
-        Returns:
-            None
-
-        Example:
-            >>> video = CameraFollowCursorCV(
-            ...     code=('string', 'print("Hello")'),
-            ...     language='python',
-            ...     video_name='HelloWorld'
-            ... )
-            >>> video.render()
-
-        Note:
-            The final MP4 file is typically located at ``./media/videos/1080p60/{video_name}.mp4``
-            (the exact sub-directory depends on Manim's quality configuration).
-        """
+    def render(self, output=DEFAULT_OUTPUT_VALUE):
         self.output = output
         self.scene.render()
 

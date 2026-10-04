@@ -1,24 +1,4 @@
-"""Video post-processing utilities for CodeVideoRenderer.
-
-This module provides a collection of standalone functions that operate on
-already-rendered (or any) video files.  They are thin, well-documented wrappers
-around ``ffmpeg`` and are designed to be called *after* a video has been
-generated, e.g.:
-
-.. code-block:: python
-
-    from CodeVideoRenderer import remove_subtitles, add_background_music
-
-    remove_subtitles("my_video.mp4")          # -> my_video_no_subs.mp4
-    add_background_music("my_video.mp4", "bgm.mp3")
-
-All functions accept ``input_path`` (a ``str`` or ``os.PathLike``) and an
-optional ``output_path``.  When ``output_path`` is omitted, a sensible name is
-derived from the input file.  Every function returns the resolved output path.
-"""
-
-from __future__ import annotations
-
+"""ffmpeg wrappers for post-processing rendered videos: subtitles, audio, quality, overlays."""
 import json
 import os
 import shutil
@@ -26,13 +6,8 @@ import subprocess
 import tempfile
 from fractions import Fraction
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
-from .typing import StrPath
-
-# ---------------------------------------------------------------------------
-# ffmpeg discovery
-# ---------------------------------------------------------------------------
+from .config import FFMPEG_THREADS, FFMPEG_PRESET, FFMPEG_BUFSIZE
 
 _POSITION_ALIASES = {
     "top-left": "tl",
@@ -55,22 +30,7 @@ _RESOLUTION_PRESETS = {
 }
 
 
-def find_ffmpeg() -> str:
-    """Locate the ``ffmpeg`` executable.
-
-    Resolution order:
-
-    1. The ``CODEVIDEORENDERER_FFMPEG`` / ``FFMPEG_BINARY`` environment variables.
-    2. ``ffmpeg`` on ``PATH``.
-    3. A handful of common install locations.
-    4. The binary bundled with ``imageio-ffmpeg`` (a dependency of this library).
-
-    Returns:
-        str: The absolute path to ``ffmpeg``.
-
-    Raises:
-        FileNotFoundError: If no ``ffmpeg`` binary could be found.
-    """
+def find_ffmpeg():
     for var in ("CODEVIDEORENDERER_FFMPEG", "FFMPEG_BINARY"):
         candidate = os.environ.get(var)
         if candidate and Path(candidate).exists():
@@ -92,7 +52,7 @@ def find_ffmpeg() -> str:
             return candidate
 
     try:
-        import imageio_ffmpeg  # type: ignore
+        import imageio_ffmpeg
 
         bundled = imageio_ffmpeg.get_ffmpeg_exe()
         if bundled and Path(bundled).exists():
@@ -106,15 +66,7 @@ def find_ffmpeg() -> str:
     )
 
 
-def find_ffprobe() -> str:
-    """Locate ``ffprobe`` next to :func:`find_ffmpeg`.
-
-    Returns:
-        str: The absolute path to ``ffprobe``.
-
-    Raises:
-        FileNotFoundError: If ``ffprobe`` cannot be found.
-    """
+def find_ffprobe():
     ffmpeg = Path(find_ffmpeg())
     name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
     candidate = ffmpeg.with_name(name)
@@ -128,16 +80,18 @@ def find_ffprobe() -> str:
     raise FileNotFoundError("Could not locate ffprobe (expected next to ffmpeg).")
 
 
-def _run_ffmpeg(args: Sequence[str]) -> None:
-    """Run ffmpeg, raising a descriptive error on failure."""
-    cmd = [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args]
+def _run_ffmpeg(args):
+    # output path is always the last argument; inject encode options before it
+    opts = ["-threads", str(FFMPEG_THREADS)]
+    if "libx264" in args:
+        opts += ["-preset", FFMPEG_PRESET, "-bufsize", FFMPEG_BUFSIZE]
+    cmd = [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args[:-1], *opts, args[-1]]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr.strip()}")
 
 
-def _run_ffprobe(args: Sequence[str]) -> str:
-    """Run ffprobe and return its stdout."""
+def _run_ffprobe(args):
     cmd = [find_ffprobe(), "-v", "error", *args]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
@@ -145,22 +99,19 @@ def _run_ffprobe(args: Sequence[str]) -> str:
     return proc.stdout
 
 
-def _default_output(input_path: StrPath, tag: str) -> str:
-    """Build a default output path by inserting ``tag`` before the extension."""
+def _default_output(input_path, tag):
     p = Path(input_path)
     return str(p.with_name(f"{p.stem}_{tag}{p.suffix}"))
 
 
-def _ffmpeg_filter_path(path: StrPath) -> str:
-    """Escape a path so it can be embedded in an ffmpeg filter argument."""
+def _ffmpeg_filter_path(path):
     p = str(path).replace("\\", "/")
     if os.name == "nt":
         p = p.replace(":", r"\:")
     return p
 
 
-def _drawtext_escape(text: str) -> str:
-    """Escape special characters for use inside an ffmpeg ``drawtext`` filter."""
+def _drawtext_escape(text):
     return (
         text.replace("\\", "\\\\")
         .replace(":", "\\:")
@@ -169,8 +120,7 @@ def _drawtext_escape(text: str) -> str:
     )
 
 
-def _default_font() -> str:
-    """Return a font file that supports CJK when available, else empty (ffmpeg default)."""
+def _default_font():
     candidates = [
         r"C:\Windows\Fonts\msyh.ttc",  # Microsoft YaHei
         r"C:\Windows\Fonts\msyh.ttf",
@@ -186,8 +136,7 @@ def _default_font() -> str:
     return ""
 
 
-def _has_audio_stream(path: StrPath) -> bool:
-    """Return ``True`` if the input contains at least one audio stream."""
+def _has_audio_stream(path):
     out = _run_ffprobe(["-select_streams", "a", "-show_entries", "stream=index", "-of", "json", str(path)])
     try:
         return bool(json.loads(out).get("streams"))
@@ -195,8 +144,7 @@ def _has_audio_stream(path: StrPath) -> bool:
         return False
 
 
-def _probe_video_info(path: StrPath) -> Tuple[int, int, float]:
-    """Return ``(width, height, fps)`` of the first video stream."""
+def _probe_video_info(path):
     out = _run_ffprobe(
         [
             "-select_streams",
@@ -213,11 +161,8 @@ def _probe_video_info(path: StrPath) -> Tuple[int, int, float]:
     return int(stream["width"]), int(stream["height"]), fps
 
 
-def _parse_resolution(resolution) -> Tuple[int, int]:
-    """Normalise a resolution specification to a ``(width, height)`` tuple.
-
-    ``-2`` as a width means "keep aspect ratio" (ffmpeg ``scale=-2:HEIGHT``).
-    """
+def _parse_resolution(resolution):
+    # -2 width keeps the aspect ratio (ffmpeg scale=-2:HEIGHT)
     if isinstance(resolution, (tuple, list)) and len(resolution) == 2:
         return int(resolution[0]), int(resolution[1])
     if isinstance(resolution, int):
@@ -231,44 +176,24 @@ def _parse_resolution(resolution) -> Tuple[int, int]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Subtitles
-# ---------------------------------------------------------------------------
-
-def remove_subtitles(input_path: StrPath, output_path: Optional[StrPath] = None) -> str:
-    """Strip all embedded subtitle streams from a video.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_no_subs.<ext>``.
-
-    Returns:
-        str: The output file path.
-    """
+def remove_subtitles(input_path, output_path=None):
     output_path = output_path or _default_output(input_path, "no_subs")
     _run_ffmpeg(["-i", str(input_path), "-map", "0", "-c", "copy", "-sn", str(output_path)])
     return str(output_path)
 
 
 def add_subtitles(
-    input_path: StrPath,
-    subtitle_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    soft: bool = False,
-) -> str:
-    """Add subtitles to a video.
-
-    Args:
-        input_path: Path to the input video.
-        subtitle_path: Path to a subtitle file (``.srt`` / ``.ass`` / ``.vtt``).
-        output_path: Optional output path. Defaults to ``<name>_subbed.<ext>``.
-        soft: If ``True``, embed the subtitle as a switchable (soft) track
-            without re-encoding video/audio. If ``False`` (default), the
-            subtitles are *burned* into the picture (always visible).
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    subtitle_path,
+    output_path=None,
+    soft=False,
+    style=None,
+    font=None,
+    fontsize=None,
+    color=None,
+    position=None,
+    margin=None,
+):
     output_path = output_path or _default_output(input_path, "subbed")
 
     if soft:
@@ -284,6 +209,19 @@ def add_subtitles(
         )
     else:
         vf = f"subtitles='{_ffmpeg_filter_path(subtitle_path)}'"
+        force = dict(style or {})
+        if font:
+            force["Fontname"] = font
+        if fontsize:
+            force["Fontsize"] = str(fontsize)
+        if color:
+            force["PrimaryColour"] = _ass_color(color)
+        if position:
+            force["Alignment"] = str(_ass_alignment(position))
+        if margin:
+            force["MarginV"] = str(margin)
+        if force:
+            vf += ":force_style='" + ",".join(f"{k}={v}" for k, v in force.items()) + "'"
         _run_ffmpeg(
             [
                 "-i", str(input_path),
@@ -295,34 +233,16 @@ def add_subtitles(
     return str(output_path)
 
 
-# ---------------------------------------------------------------------------
-# Audio
-# ---------------------------------------------------------------------------
-
 def add_background_music(
-    input_path: StrPath,
-    music_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    volume: float = 0.3,
-    loop: bool = True,
-    mix_original: bool = True,
-) -> str:
-    """Mix a background-music track into a video.
-
-    Args:
-        input_path: Path to the input video.
-        music_path: Path to the audio file (``.mp3`` / ``.wav`` / ``.m4a`` …).
-        output_path: Optional output path. Defaults to ``<name>_bgm.<ext>``.
-        volume: Volume multiplier applied to the music (0.0–1.0+). Defaults to 0.3.
-        loop: Loop the music to cover the whole video. Defaults to ``True``.
-        mix_original: If the video already has audio, mix it with the music.
-            If the video has no audio, the music simply becomes the audio track.
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    music_path,
+    output_path=None,
+    volume=0.3,
+    loop=True,
+    mix_original=True,
+):
     output_path = output_path or _default_output(input_path, "bgm")
-    loop_args: List[str] = ["-stream_loop", "-1"] if loop else []
+    loop_args = ["-stream_loop", "-1"] if loop else []
     has_audio = _has_audio_stream(input_path)
 
     if has_audio and mix_original:
@@ -350,17 +270,7 @@ def add_background_music(
     return str(output_path)
 
 
-def extract_audio(input_path: StrPath, output_path: Optional[StrPath] = None, format: str = "mp3") -> str:
-    """Extract the audio track of a video into a standalone audio file.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>.<format>``.
-        format: Output audio format (``mp3`` / ``wav`` / ``m4a`` / ``aac``).
-
-    Returns:
-        str: The output audio path.
-    """
+def extract_audio(input_path, output_path=None, format="mp3"):
     fmt = format.lower().lstrip(".")
     codecs = {"mp3": "libmp3lame", "wav": "pcm_s16le", "m4a": "aac", "aac": "aac"}
     if fmt not in codecs:
@@ -372,45 +282,23 @@ def extract_audio(input_path: StrPath, output_path: Optional[StrPath] = None, fo
     return str(output_path)
 
 
-def remove_audio(input_path: StrPath, output_path: Optional[StrPath] = None) -> str:
-    """Remove the audio track from a video (producing a silent video).
-
-    Returns:
-        str: The output file path.
-    """
+def remove_audio(input_path, output_path=None):
     output_path = output_path or _default_output(input_path, "mute")
     _run_ffmpeg(["-i", str(input_path), "-c", "copy", "-an", str(output_path)])
     return str(output_path)
 
 
-# ---------------------------------------------------------------------------
-# Editing / quality
-# ---------------------------------------------------------------------------
-
 def concat_videos(
-    input_paths: Iterable[StrPath],
-    output_path: StrPath,
-    reencode: bool = False,
-) -> str:
-    """Concatenate multiple videos into one.
-
-    Args:
-        input_paths: An iterable of input video paths, in the desired order.
-        output_path: The output path (required).
-        reencode: If ``False`` (default), streams are copied without re-encoding
-            — fast, but all inputs must share the same codec/resolution. Set to
-            ``True`` to re-encode (handles codec differences; inputs must still
-            have matching resolution for the concat filter).
-
-    Returns:
-        str: The output file path.
-    """
+    input_paths,
+    output_path,
+    reencode=False,
+):
     paths = [str(Path(p).resolve()) for p in input_paths]
     if len(paths) < 2:
         raise ValueError("concat_videos requires at least two input videos.")
 
     if reencode:
-        inputs: List[str] = []
+        inputs = []
         for p in paths:
             inputs += ["-i", p]
         n = len(paths)
@@ -463,29 +351,15 @@ def concat_videos(
 
 
 def set_quality(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    resolution: Optional[Union[str, int, Tuple[int, int]]] = None,
-    fps: Optional[Union[int, float]] = None,
-    bitrate: Optional[str] = None,
-    crf: Optional[int] = None,
-) -> str:
-    """Re-encode a video with a chosen resolution, frame rate, bitrate or CRF.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_quality.<ext>``.
-        resolution: A preset string (``"1080p"``, ``"4k"`` …), a target height
-            (``1080``), or a ``(width, height)`` tuple.
-        fps: Output frame rate.
-        bitrate: Video bitrate, e.g. ``"5M"``.
-        crf: Constant Rate Factor (lower = higher quality, 18–28 typical).
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    output_path=None,
+    resolution=None,
+    fps=None,
+    bitrate=None,
+    crf=None,
+):
     output_path = output_path or _default_output(input_path, "quality")
-    args: List[str] = ["-i", str(input_path)]
+    args = ["-i", str(input_path)]
 
     if resolution is not None:
         width, height = _parse_resolution(resolution)
@@ -509,26 +383,14 @@ def set_quality(
 
 
 def trim_video(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    start: float = 0.0,
-    end: Optional[float] = None,
-    duration: Optional[float] = None,
-) -> str:
-    """Cut a segment out of a video.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_trim.<ext>``.
-        start: Start time in seconds.
-        end: End time in seconds (alternative to ``duration``).
-        duration: Segment duration in seconds.
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    output_path=None,
+    start=0.0,
+    end=None,
+    duration=None,
+):
     output_path = output_path or _default_output(input_path, "trim")
-    args: List[str] = ["-i", str(input_path), "-ss", str(start)]
+    args = ["-i", str(input_path), "-ss", str(start)]
     if duration is not None:
         args += ["-t", str(duration)]
     elif end is not None:
@@ -539,20 +401,10 @@ def trim_video(
 
 
 def change_speed(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    speed: float = 1.0,
-) -> str:
-    """Speed up or slow down a video while keeping audio in sync.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_speed.<ext>``.
-        speed: Playback speed multiplier (e.g. 2.0 = twice as fast).
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    output_path=None,
+    speed=1.0,
+):
     if speed <= 0:
         raise ValueError("speed must be greater than 0")
     output_path = output_path or _default_output(input_path, f"speed{speed}".replace(".", "_"))
@@ -567,12 +419,7 @@ def change_speed(
     return str(output_path)
 
 
-# ---------------------------------------------------------------------------
-# Overlays (watermark / title / cover)
-# ---------------------------------------------------------------------------
-
-def _overlay_position(position: str, margin: int) -> Tuple[str, str]:
-    """Return ffmpeg overlay ``(x, y)`` expressions for a named position."""
+def _overlay_position(position, margin):
     pos = _POSITION_ALIASES.get(position.lower(), "br")
     if pos == "tl":
         return f"{margin}", f"{margin}"
@@ -585,8 +432,7 @@ def _overlay_position(position: str, margin: int) -> Tuple[str, str]:
     return f"W-w-{margin}", f"H-h-{margin}"  # bottom-right
 
 
-def _drawtext_position(position: str, margin: int) -> Tuple[str, str]:
-    """Return drawtext ``(x, y)`` expressions for a named position."""
+def _drawtext_position(position, margin):
     pos = _POSITION_ALIASES.get(position.lower(), "br")
     if pos == "tl":
         return f"{margin}", f"{margin}"
@@ -600,33 +446,16 @@ def _drawtext_position(position: str, margin: int) -> Tuple[str, str]:
 
 
 def add_watermark(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    text: Optional[str] = None,
-    image_path: Optional[StrPath] = None,
-    position: str = "bottom-right",
-    fontsize: int = 24,
-    opacity: float = 0.6,
-    color: str = "white",
-    margin: int = 20,
-) -> str:
-    """Overlay a text or image watermark onto a video.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_wm.<ext>``.
-        text: Watermark text (used when ``image_path`` is ``None``).
-        image_path: Path to a watermark image (with transparency recommended).
-        position: One of ``"top-left"``, ``"top-right"``, ``"bottom-left"``,
-            ``"bottom-right"``, ``"center"``.
-        fontsize: Font size for text watermarks.
-        opacity: Watermark opacity (0.0–1.0).
-        color: Text color for text watermarks.
-        margin: Distance from the edge, in pixels.
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    output_path=None,
+    text=None,
+    image_path=None,
+    position="bottom-right",
+    fontsize=24,
+    opacity=0.6,
+    color="white",
+    margin=20,
+):
     if text is None and image_path is None:
         raise ValueError("Provide either `text` or `image_path` for the watermark.")
     output_path = output_path or _default_output(input_path, "wm")
@@ -660,32 +489,16 @@ def add_watermark(
 
 
 def add_title_card(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    title: Optional[str] = None,
-    subtitle: Optional[str] = None,
-    duration: float = 3.0,
-    background_color: str = "black",
-    title_color: str = "white",
-    subtitle_color: str = "0xCCCCCC",
-    fontsize: int = 64,
-) -> str:
-    """Prepend a title screen to the beginning of a video.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_titled.<ext>``.
-        title: Main title text. Defaults to the input file stem.
-        subtitle: Optional secondary line shown under the title.
-        duration: Length of the title screen in seconds.
-        background_color: Background color of the title screen.
-        title_color: Title text color.
-        subtitle_color: Subtitle text color.
-        fontsize: Title font size.
-
-    Returns:
-        str: The output file path.
-    """
+    input_path,
+    output_path=None,
+    title=None,
+    subtitle=None,
+    duration=3.0,
+    background_color="black",
+    title_color="white",
+    subtitle_color="0xCCCCCC",
+    fontsize=64,
+):
     output_path = output_path or _default_output(input_path, "titled")
     title = title or Path(input_path).stem
     width, height, fps = _probe_video_info(input_path)
@@ -711,7 +524,7 @@ def add_title_card(
         has_audio = _has_audio_stream(input_path)
 
         # Keep the title card's audio stream consistent with the source video so concat(reencode) joins cleanly
-        title_args: List[str] = [
+        title_args = [
             "-f", "lavfi",
             "-i", f"color=c={background_color}:s={width}x{height}:d={duration}:r={fps}",
         ]
@@ -730,29 +543,196 @@ def add_title_card(
 
 
 def extract_cover(
-    input_path: StrPath,
-    output_path: Optional[StrPath] = None,
-    time: float = 0.5,
-    width: Optional[int] = None,
-) -> str:
-    """Extract a still frame from a video to use as a cover/thumbnail.
-
-    Args:
-        input_path: Path to the input video.
-        output_path: Optional output path. Defaults to ``<name>_cover.png``.
-        time: Timestamp (in seconds) of the frame to capture.
-        width: Optional output width in pixels (height is scaled proportionally).
-
-    Returns:
-        str: The output image path.
-    """
+    input_path,
+    output_path=None,
+    time=0.5,
+    width=None,
+):
     if output_path is None:
         output_path = str(Path(input_path).with_name(f"{Path(input_path).stem}_cover.png"))
-    args: List[str] = ["-ss", str(time), "-i", str(input_path), "-frames:v", "1"]
+    args = ["-ss", str(time), "-i", str(input_path), "-frames:v", "1"]
     if width is not None:
         args += ["-vf", f"scale={int(width)}:-2"]
     args += [str(output_path)]
     _run_ffmpeg(args)
+    return str(output_path)
+
+
+def _ass_time(seconds):
+    ms = int(round(seconds * 1000))
+    return f"{ms // 3600000}:{(ms // 60000) % 60:02d}:{(ms // 1000) % 60:02d}.{(ms // 10) % 100:02d}"
+
+
+def _ass_color(color):
+    named = {
+        "white": "FFFFFF", "black": "000000", "red": "FF0000", "green": "00FF00",
+        "blue": "0000FF", "yellow": "FFFF00", "cyan": "00FFFF", "magenta": "FF00FF",
+    }
+    c = named.get(str(color).lower(), str(color).lstrip("#").lstrip("0x").lstrip("0X"))
+    if len(c) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in c):
+        c = "FFFFFF"
+    # ASS stores colour as &HAABBGGRR
+    return f"&H00{c[4:6]}{c[2:4]}{c[0:2]}"
+
+
+def _ass_alignment(position):
+    v, _, h = str(position).lower().partition("-")
+    v_index = {"bottom": 0, "middle": 1, "top": 2}.get(v, 0)
+    h_index = {"left": 0, "center": 1, "right": 2}.get(h, 1)
+    return v_index * 3 + h_index + 1
+
+
+def _build_ass(lyrics, width, height, font, fontsize, color, highlight_color, position, margin, karaoke):
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {width}\n"
+        f"PlayResY: {height}\n"
+        "WrapStyle: 2\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font or 'Arial'},{fontsize},{_ass_color(color)},{_ass_color(highlight_color)},{_ass_color(color)},&H00000000,0,0,0,0,100,100,0,0,1,2,0,{_ass_alignment(position)},10,10,{margin},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    out = [header]
+    for start, end, text in lyrics:
+        text = str(text).replace("\\", "\\\\").replace("\n", "\\N")
+        if karaoke:
+            text = f"{{\\k{int(round((end - start) * 100))}}}{text}"
+        out.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
+    return "\n".join(out) + "\n"
+
+
+def add_background(
+    input_path,
+    output_path=None,
+    color=None,
+    image=None,
+    blur=0,
+):
+    output_path = output_path or _default_output(input_path, "bg")
+    width, height, _ = _probe_video_info(input_path)
+
+    if image is not None:
+        filter_complex = (
+            f"[1:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma={blur}[bg];"
+            f"[0:v]format=rgba[fg];[bg][fg]overlay=0:0"
+        )
+        _run_ffmpeg(
+            [
+                "-i", str(input_path),
+                "-loop", "1", "-i", str(image),
+                "-filter_complex", filter_complex,
+                "-map", "0:a?", "-c:a", "copy",
+                "-shortest",
+                str(output_path),
+            ]
+        )
+        return str(output_path)
+
+    _run_ffmpeg(
+        [
+            "-f", "lavfi", "-i", f"color=c={color or 'black'}:s={width}x{height}",
+            "-i", str(input_path),
+            "-filter_complex", "[1:v]format=rgba[fg];[0:v][fg]overlay=0:0",
+            "-map", "1:a?", "-c:a", "copy",
+            "-shortest",
+            str(output_path),
+        ]
+    )
+    return str(output_path)
+
+
+def replace_background(
+    input_path,
+    background,
+    output_path=None,
+    key_color="0x00FF00",
+    similarity=0.3,
+    blend=0.1,
+    blur=0,
+):
+    output_path = output_path or _default_output(input_path, "bg")
+    width, height, _ = _probe_video_info(input_path)
+    filter_complex = (
+        f"[0:v]chromakey={key_color}:{similarity}:{blend}[fg];"
+        f"[1:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},gblur=sigma={blur}[bg];"
+        f"[bg][fg]overlay=0:0"
+    )
+    _run_ffmpeg(
+        [
+            "-i", str(input_path),
+            "-loop", "1", "-i", str(background),
+            "-filter_complex", filter_complex,
+            "-map", "0:a?", "-c:a", "copy",
+            "-shortest",
+            str(output_path),
+        ]
+    )
+    return str(output_path)
+
+
+def add_sound(
+    input_path,
+    sound,
+    output_path=None,
+    at=0.0,
+    volume=1.0,
+):
+    output_path = output_path or _default_output(input_path, "sfx")
+    delay = int(round(at * 1000))
+    sfx = f"[1:a]volume={volume},adelay={delay}|{delay}[sfx]"
+    if _has_audio_stream(input_path):
+        fc = f"{sfx};[0:a][sfx]amix=inputs=2:duration=first:normalize=0[aout]"
+        audio_map = "[aout]"
+    else:
+        fc = sfx
+        audio_map = "[sfx]"
+    _run_ffmpeg(
+        [
+            "-i", str(input_path),
+            "-i", str(sound),
+            "-filter_complex", fc,
+            "-map", "0:v", "-map", audio_map,
+            "-c:v", "copy", "-c:a", "aac",
+            str(output_path),
+        ]
+    )
+    return str(output_path)
+
+
+def add_lyrics(
+    input_path,
+    lyrics,
+    output_path=None,
+    font="",
+    fontsize=48,
+    color="white",
+    highlight_color="yellow",
+    position="bottom-center",
+    margin=80,
+    karaoke=True,
+):
+    output_path = output_path or _default_output(input_path, "lyrics")
+    width, height, _ = _probe_video_info(input_path)
+    ass = _build_ass(lyrics, width, height, font, fontsize, color, highlight_color, position, margin, karaoke)
+    with tempfile.TemporaryDirectory() as tmp:
+        ass_path = Path(tmp) / "lyrics.ass"
+        ass_path.write_text(ass, encoding="utf-8")
+        vf = f"subtitles='{_ffmpeg_filter_path(ass_path)}'"
+        _run_ffmpeg(
+            [
+                "-i", str(input_path),
+                "-vf", vf,
+                "-c:v", "libx264", "-c:a", "copy",
+                str(output_path),
+            ]
+        )
     return str(output_path)
 
 
@@ -771,4 +751,8 @@ __all__ = [
     "add_watermark",
     "add_title_card",
     "extract_cover",
+    "add_background",
+    "replace_background",
+    "add_sound",
+    "add_lyrics",
 ]
