@@ -1,4 +1,5 @@
 """PyQt5 GUI for CodeVideoRenderer: write code, configure effects, render a typing video."""
+import os
 import re
 import sys
 import traceback
@@ -7,16 +8,19 @@ from pathlib import Path
 from PyQt5.QtCore import Qt, QThread, QSize, QRect, QUrl, QRegularExpression, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QSyntaxHighlighter, QTextCharFormat,
-    QTextFormat, QKeySequence, QDesktopServices,
+    QTextFormat, QKeySequence, QDesktopServices, QFontDatabase,
 )
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPlainTextEdit, QComboBox, QLineEdit, QCheckBox, QPushButton, QLabel,
     QFormLayout, QScrollArea, QSpinBox, QDoubleSpinBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QTextBrowser, QAbstractItemView,
-    QHeaderView, QTextEdit, QColorDialog,
+    QHeaderView, QTextEdit, QColorDialog, QDialog, QSlider,
 )
 
+import CodeVideoRenderer
 from CodeVideoRenderer import (
     CameraFollowCursorCV, add_background_music, add_background,
     replace_background, add_sound, add_subtitles, add_lyrics, add_watermark,
@@ -38,6 +42,10 @@ C_COMMENT = "#6A9955"
 C_NUMBER = "#B5CEA8"
 C_FUNC = "#DCDCAA"
 C_BUILTIN = "#9CDCFE"
+
+# CJK-capable monospace font bundled with the package (matches the rendered output)
+EDITOR_FONT_FAMILY = "CodeVideoRendererFont"
+EDITOR_FONT_SIZE = 15
 
 LANGUAGES = [
     "python", "javascript", "typescript", "cpp", "c", "java", "go", "rust",
@@ -479,7 +487,7 @@ class SyntaxHighlighter(QSyntaxHighlighter):
 class CodeEditor(QPlainTextEdit):
     def __init__(self):
         super().__init__()
-        self.setFont(QFont("Consolas", 13))
+        self.setFont(QFont(EDITOR_FONT_FAMILY, EDITOR_FONT_SIZE))
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self.setStyleSheet(f"""
             QPlainTextEdit {{
@@ -709,6 +717,11 @@ class MainWindow(QMainWindow):
         self.preview_btn.setMinimumHeight(36)
         self.preview_btn.clicked.connect(self._start_preview)
 
+        self.play_btn = QPushButton("Play Video")
+        self.play_btn.setMinimumHeight(36)
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self._play_video)
+
         self.open_btn = QPushButton("Open Folder")
         self.open_btn.setMinimumHeight(36)
         self.open_btn.clicked.connect(self._open_output_folder)
@@ -724,6 +737,7 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout()
         bottom.addWidget(self.render_btn, 1)
         bottom.addWidget(self.preview_btn, 1)
+        bottom.addWidget(self.play_btn, 1)
         bottom.addWidget(self.open_btn, 1)
         bottom.addWidget(self.result_label, 3)
         layout.addLayout(bottom)
@@ -1121,8 +1135,10 @@ class MainWindow(QMainWindow):
     def _on_done(self, path):
         self.render_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
+        self.play_btn.setEnabled(True)
         self._last_output = path
         self.result_label.setText(f"Ready: {path}")
+        self._play_video()
 
     def _on_failed(self, err):
         self.render_btn.setEnabled(True)
@@ -1133,12 +1149,90 @@ class MainWindow(QMainWindow):
         folder = Path(self._last_output).parent if self._last_output else Path.cwd() / "media" / "videos"
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
+    def _play_video(self):
+        if not self._last_output or not os.path.isfile(self._last_output):
+            return
+        self._player_dialog = VideoPlayerDialog(self._last_output, self)
+        self._player_dialog.show()
+
+
+class VideoPlayerDialog(QDialog):
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Preview")
+        self.resize(960, 620)
+
+        layout = QVBoxLayout(self)
+        self.video_widget = QVideoWidget()
+        layout.addWidget(self.video_widget, 1)
+
+        self.player = QMediaPlayer(self)
+        self.player.setVideoOutput(self.video_widget)
+        self.player.setMedia(QMediaContent(QUrl.fromLocalFile(video_path)))
+
+        controls = QHBoxLayout()
+        self.play_pause_btn = QPushButton("Pause")
+        self.play_pause_btn.clicked.connect(self._toggle)
+        controls.addWidget(self.play_pause_btn)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, 0)
+        self.slider.sliderMoved.connect(self.player.setPosition)
+        controls.addWidget(self.slider, 1)
+        self.time_label = QLabel("00:00 / 00:00")
+        controls.addWidget(self.time_label)
+        layout.addLayout(controls)
+
+        self.player.positionChanged.connect(self._on_position)
+        self.player.durationChanged.connect(self._on_duration)
+        self.player.stateChanged.connect(self._on_state)
+        self.player.error.connect(self._on_error)
+        self.player.play()
+
+    def _toggle(self):
+        if self.player.state() == QMediaPlayer.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def _on_duration(self, ms):
+        self.slider.setRange(0, ms)
+        self._update_time()
+
+    def _on_position(self, ms):
+        self.slider.setValue(ms)
+        self._update_time()
+
+    def _update_time(self):
+        self.time_label.setText(f"{self._fmt(self.player.position())} / {self._fmt(self.player.duration())}")
+
+    def _on_state(self, state):
+        self.play_pause_btn.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+
+    def _on_error(self, error):
+        self.time_label.setText(f"Playback error: {self.player.errorString()}")
+
+    @staticmethod
+    def _fmt(ms):
+        s = ms // 1000
+        return f"{s // 60:02d}:{s % 60:02d}"
+
+    def closeEvent(self, event):
+        self.player.stop()
+        super().closeEvent(event)
+
 
 def main():
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    font_path = os.path.join(os.path.dirname(CodeVideoRenderer.__file__), "fonts", "CodeVideoRendererFont.ttf")
+    if os.path.isfile(font_path):
+        QFontDatabase.addApplicationFont(font_path)
+
     app.setStyleSheet(f"""
-        QWidget {{ background-color: {EDITOR_BG}; color: {EDITOR_FG}; font-size: 13px; }}
+        QWidget {{ background-color: {EDITOR_BG}; color: {EDITOR_FG}; font-size: 14px; }}
         QLabel {{ background: transparent; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTableWidget {{
             background-color: {EDITOR_CURRENT_LINE}; color: {EDITOR_FG};
